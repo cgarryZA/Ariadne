@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "ariadne": {
+      "command": "python",
+      "args": ["/absolute/path/to/ariadne/server.py"],
+      "env": {
+        "S2_API_KEY": "your_key_here"
+      }
+    }
+  }
+}
