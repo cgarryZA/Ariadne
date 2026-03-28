@@ -161,10 +161,10 @@ async def find_related(
     paper_id: str, limit: int = 10, library_ids: Optional[set[str]] = None,
 ) -> list[SearchResult]:
     """Get S2 recommended papers based on a given paper."""
-    # Use the single-paper recommendations endpoint (more reliable)
     resp = await _request_with_retry(
-        "GET",
-        f"{RECS_URL}/papers/forpaper/{paper_id}",
+        "POST",
+        f"{RECS_URL}/papers/",
+        json={"positivePaperIds": [paper_id]},
         params={"fields": PAPER_FIELDS, "limit": min(limit, 100)},
         headers=_headers(),
     )
