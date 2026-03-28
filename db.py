@@ -121,23 +121,27 @@ END;
 _conn: Optional[aiosqlite.Connection] = None
 
 
+async def _open_connection() -> aiosqlite.Connection:
+    """Open a fresh connection and run schema setup."""
+    conn = await aiosqlite.connect(DB_PATH)
+    conn.row_factory = aiosqlite.Row
+    await conn.executescript(SCHEMA)
+    # FTS5 and triggers — safe to re-run (IF NOT EXISTS)
+    try:
+        await conn.executescript(FTS_SCHEMA)
+        await conn.executescript(FTS_TRIGGERS)
+    except Exception:
+        pass  # FTS5 not available — degrade gracefully
+    await conn.commit()
+    return conn
+
+
 async def init() -> None:
     """Open the database and run schema migration (call once at startup)."""
     global _conn
     if _conn is not None:
         return
-    _conn = await aiosqlite.connect(DB_PATH)
-    _conn.row_factory = aiosqlite.Row
-    await _conn.executescript(SCHEMA)
-    # FTS5 and triggers — safe to re-run (IF NOT EXISTS)
-    try:
-        await _conn.executescript(FTS_SCHEMA)
-        await _conn.executescript(FTS_TRIGGERS)
-    except Exception:
-        # FTS5 not available in this SQLite build — degrade gracefully
-        pass
-    await _conn.commit()
-    # Populate FTS from any existing rows that pre-date the triggers
+    _conn = await _open_connection()
     await _rebuild_fts()
 
 
@@ -145,14 +149,44 @@ async def close() -> None:
     """Close the singleton connection (call on shutdown)."""
     global _conn
     if _conn is not None:
-        await _conn.close()
+        try:
+            await _conn.close()
+        except Exception:
+            pass
         _conn = None
 
 
+async def _reconnect() -> aiosqlite.Connection:
+    """Drop the current connection and open a fresh one.
+
+    Handles cases where the DB file was modified externally (e.g. ALTER TABLE
+    from another process) and the cached connection is in a bad state.
+    """
+    global _conn
+    if _conn is not None:
+        try:
+            await _conn.close()
+        except Exception:
+            pass
+    _conn = await _open_connection()
+    return _conn
+
+
 async def get_db() -> aiosqlite.Connection:
-    """Return the singleton connection, initialising if needed."""
+    """Return the singleton connection, initialising if needed.
+
+    If the connection is broken (e.g. external schema changes), automatically
+    reconnects.
+    """
+    global _conn
     if _conn is None:
         await init()
+        return _conn  # type: ignore[return-value]
+    # Health check — try a trivial query; reconnect if it fails
+    try:
+        await _conn.execute("SELECT 1")
+    except Exception:
+        _conn = await _reconnect()
     return _conn  # type: ignore[return-value]
 
 
