@@ -79,6 +79,22 @@ CHAPTERS = [
     "numerical_methodology", "empirical_results", "conclusion", "appendix",
 ]
 
+MOVE_HEX = {
+    "foundational": "#58a6ff",
+    "gap":          "#d29922",
+    "parallel":     "#3fb950",
+}
+MOVE_ICON = {
+    "foundational": "▽",
+    "gap":          "◇",
+    "parallel":     "△",
+}
+MOVE_LABEL = {
+    "foundational": "Foundational",
+    "gap":          "Gap",
+    "parallel":     "Parallel",
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Global CSS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -344,6 +360,19 @@ def _status_badge(status: str) -> str:
 def _tag_chips(tags: list[str]) -> str:
     return "".join(f'<span class="tag-badge">{t}</span>' for t in tags)
 
+def _move_badge(move: str) -> str:
+    if not move:
+        return ""
+    icon = MOVE_ICON.get(move, "·")
+    label = MOVE_LABEL.get(move, move)
+    colour = MOVE_HEX.get(move, "#6e7681")
+    return _badge(f"{icon} {label}", colour, colour + "18")
+
+def _quality_stars(score) -> str:
+    if not score:
+        return ""
+    return f'<span style="color:#d29922;font-size:0.72rem" title="Quality: {score}/5">{"◆" * score}{"◇" * (5 - score)}</span>'
+
 def _paper_card(p: dict, accent: str = "") -> str:
     colour = PILLAR_HEX.get(p.get("pillar") or "unassigned", "#30363d")
     authors = ", ".join(a["name"] for a in p.get("authors", [])[:3])
@@ -353,11 +382,16 @@ def _paper_card(p: dict, accent: str = "") -> str:
     cit = f'{p["citation_count"]:,} citations' if p.get("citation_count") else ""
     venue = p.get("venue") or ""
     tags_html = _tag_chips(p.get("tags") or [])
-    tldr = p.get("tldr") or ""
+    themes_html = _tag_chips(p.get("themes") or [])
+    summary = p.get("summary") or ""
+    tldr = summary or p.get("tldr") or ""
     tldr_html = f'<div class="paper-tldr">{tldr[:220]}{"…" if len(tldr)>220 else ""}</div>' if tldr else ""
     meta_parts = [x for x in [year, venue, cit] if x]
     stars = ("★" * (p.get("relevance") or 0)) + ("☆" * (5 - (p.get("relevance") or 0)))
     stars_html = f'<span style="color:#d29922;font-size:0.75rem">{stars}</span>' if p.get("relevance") else ""
+
+    move_html = _move_badge(p.get("move", ""))
+    quality_html = _quality_stars(p.get("quality_score"))
 
     return (
         f'<div class="paper-card" style="border-left-color:{colour}">'
@@ -366,10 +400,11 @@ def _paper_card(p: dict, accent: str = "") -> str:
         f'<div class="paper-meta">'
         f'{_status_badge(p.get("status","unread"))}'
         f'{_pillar_badge(p.get("pillar","unassigned"))}'
+        f'{move_html}'
         f'{"".join(f"<span>{x}</span>" for x in meta_parts)}'
-        f'{stars_html}'
+        f'{stars_html} {quality_html}'
         f'</div>'
-        f'{f"<div style=margin-top:8px>{tags_html}</div>" if tags_html else ""}'
+        f'{f"<div style=margin-top:8px>{tags_html} {themes_html}</div>" if (tags_html or themes_html) else ""}'
         f'{tldr_html}'
         f'</div>'
     )

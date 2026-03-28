@@ -22,6 +22,13 @@ class ReadingStatus(str, Enum):
     DEEP_READ = "deep_read"
 
 
+class Move(str, Enum):
+    """Oxford three-move literature review classification."""
+    FOUNDATIONAL = "foundational"
+    GAP = "gap"
+    PARALLEL = "parallel"
+
+
 class Author(BaseModel):
     name: str
     author_id: Optional[str] = None
@@ -59,6 +66,14 @@ class Paper(BaseModel):
 
     # Section/chapter mapping
     chapter: Optional[str] = None
+
+    # Claude-generated analysis (persisted across sessions)
+    summary: Optional[str] = None
+    key_findings: list[str] = Field(default_factory=list)
+    quality_score: Optional[int] = Field(None, ge=1, le=5)
+    quality_notes: Optional[str] = None
+    move: Optional[Move] = None
+    themes: list[str] = Field(default_factory=list)
 
 
 class Citation(BaseModel):

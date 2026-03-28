@@ -40,7 +40,13 @@ CREATE TABLE IF NOT EXISTS papers (
     limitations TEXT,
     math_framework TEXT,
     convergence_bounds TEXT,
-    chapter TEXT
+    chapter TEXT,
+    summary TEXT,
+    key_findings TEXT,
+    quality_score INTEGER,
+    quality_notes TEXT,
+    move TEXT,
+    themes TEXT
 );
 
 CREATE TABLE IF NOT EXISTS citations (
@@ -83,6 +89,8 @@ def _paper_from_row(row: aiosqlite.Row) -> Paper:
     d = dict(row)
     d["authors"] = json.loads(d["authors"]) if d["authors"] else []
     d["tags"] = json.loads(d["tags"]) if d["tags"] else []
+    d["key_findings"] = json.loads(d["key_findings"]) if d.get("key_findings") else []
+    d["themes"] = json.loads(d["themes"]) if d.get("themes") else []
     return Paper(**d)
 
 
@@ -102,8 +110,9 @@ async def insert_paper(paper: Paper) -> None:
             (id, title, authors, year, venue, abstract, doi, arxiv_id, url,
              pdf_url, pdf_local_path, citation_count, tldr, bibtex, added_at,
              pillar, tags, status, relevance, notes,
-             methodology, limitations, math_framework, convergence_bounds, chapter)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             methodology, limitations, math_framework, convergence_bounds, chapter,
+             summary, key_findings, quality_score, quality_notes, move, themes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 paper.id, paper.title, _serialize_authors(paper.authors),
                 paper.year, paper.venue, paper.abstract, paper.doi,
@@ -115,6 +124,10 @@ async def insert_paper(paper: Paper) -> None:
                 paper.relevance, paper.notes,
                 paper.methodology, paper.limitations,
                 paper.math_framework, paper.convergence_bounds, paper.chapter,
+                paper.summary, json.dumps(paper.key_findings),
+                paper.quality_score, paper.quality_notes,
+                paper.move.value if paper.move else None,
+                json.dumps(paper.themes),
             ),
         )
         await db.commit()
@@ -201,6 +214,14 @@ async def update_paper(paper_id: str, **fields) -> bool:
             fields["pillar"] = fields["pillar"].value
         if "status" in fields and isinstance(fields["status"], ReadingStatus):
             fields["status"] = fields["status"].value
+        if "key_findings" in fields and isinstance(fields["key_findings"], list):
+            fields["key_findings"] = json.dumps(fields["key_findings"])
+        if "themes" in fields and isinstance(fields["themes"], list):
+            fields["themes"] = json.dumps(fields["themes"])
+        if "move" in fields:
+            from models import Move
+            if isinstance(fields["move"], Move):
+                fields["move"] = fields["move"].value
 
         sets = ", ".join(f"{k} = ?" for k in fields)
         vals = list(fields.values()) + [paper_id]

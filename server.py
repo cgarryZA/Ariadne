@@ -29,7 +29,7 @@ from apis import semantic_scholar as s2
 from apis import openalex as oa
 from apis import arxiv_client as arxiv
 from bibtex import export_bibtex as _export_bib, parse_bibtex_file, bibtex_authors_to_list, paper_to_bibtex
-from models import Author, Paper, Pillar, ReadingStatus, Citation
+from models import Author, Paper, Pillar, ReadingStatus, Citation, Move
 
 # Configurable directories (override via environment variables)
 PAPERS_DIR = Path(os.environ.get("ARIADNE_PAPERS_DIR", Path(__file__).parent / "pdfs"))
@@ -1609,6 +1609,683 @@ async def deduplicate_library() -> str:
             lines.append(f"  ID: {p.id} | {p.title[:70]} ({p.year})")
         lines.append("  → Keep one, remove others with remove_paper(id)")
         lines.append("")
+
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PIPELINE — Full Literature Review Workflow (Research Question → Final Review)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ── Stage 1: Define ──────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def generate_search_strategy(
+    research_question: str,
+    field: str = "general",
+    num_themes: int = 3,
+) -> str:
+    """Generate a systematic search strategy from a research question.
+
+    Returns a structured template with suggested search queries, databases,
+    year ranges, and Boolean operators — the first step in a full literature
+    review pipeline. Review the strategy, adjust as needed, then execute
+    each query using multi_search().
+
+    Args:
+        research_question: The central research question driving the review
+        field: Academic field (e.g. 'mathematics', 'computer_science', 'finance')
+        num_themes: Number of thematic strands to search (default 3)
+    """
+    # Get library stats for context
+    stats = await db.library_stats()
+
+    arx_categories = {
+        "mathematics": "math.PR, math.NA, math.AP, math.OC",
+        "computer_science": "cs.LG, cs.AI, cs.NE, cs.CE",
+        "finance": "q-fin.TR, q-fin.MF, q-fin.CP, q-fin.RM",
+        "physics": "physics.comp-ph, cond-mat.stat-mech",
+        "statistics": "stat.ML, stat.ME, stat.TH",
+    }
+    suggested_cats = arx_categories.get(field, "cs.LG, math.NA")
+
+    lines = [
+        "SEARCH STRATEGY GENERATOR",
+        f"Research Question: {research_question}",
+        f"Field: {field}",
+        f"Current library: {stats['total']} papers",
+        "",
+        "─" * 60,
+        "",
+        f"TASK: Generate a {num_themes}-theme search strategy for this research question.",
+        "",
+        "For each theme, provide:",
+        "  1. Theme name (e.g. 'Deep learning BSDE solvers')",
+        "  2. Primary query for Semantic Scholar (natural language)",
+        "  3. arXiv query with categories (suggested: " + suggested_cats + ")",
+        "  4. OpenAlex query",
+        "  5. Year range (e.g. '2015-' for recent, '2000-2024' for comprehensive)",
+        "  6. Key authors to seed (use seed_library later)",
+        "",
+        "Also specify:",
+        "  - Inclusion criteria (for screen_papers later)",
+        "  - Exclusion criteria (for screen_papers later)",
+        "  - Expected total papers after screening (~20-50 for a section, ~50-150 for a full review)",
+        "",
+        "After generating the strategy, execute it step by step:",
+        "  1. Run multi_search() for each theme's queries",
+        "  2. Run seed_library() for each key author",
+        "  3. Add relevant papers with add_paper()",
+        "  4. Build citation links with build_citation_network() on 3-4 seed papers",
+        "  5. Deduplicate with deduplicate_library()",
+        "  6. Screen with screen_papers(include_criteria, exclude_criteria)",
+    ]
+
+    return "\n".join(lines)
+
+
+# ── Stage 2: Read & Analyse ─────────────────────────────────────────
+
+
+@mcp.tool()
+async def summarize_paper(paper_id: str) -> str:
+    """Return a paper's full content for comprehensive summarisation.
+
+    Returns the abstract, TLDR, full text (if downloaded), and existing notes
+    formatted for you to write a thorough summary. After reviewing, call
+    store_summary(paper_id, summary) to persist your summary.
+
+    Args:
+        paper_id: The paper's Semantic Scholar ID
+    """
+    paper = await db.get_paper(paper_id)
+    if not paper:
+        return "Paper not found in library."
+
+    fulltext = await db.get_fulltext(paper_id)
+
+    authors = ", ".join(a.name for a in paper.authors[:4])
+    if len(paper.authors) > 4:
+        authors += " et al."
+
+    lines = [
+        "SUMMARISATION TASK",
+        f"Title: {paper.title}",
+        f"Authors: {authors} ({paper.year or '?'})",
+        f"Venue: {paper.venue or 'Unknown'}",
+        f"Citations: {paper.citation_count or 0}",
+        "",
+    ]
+
+    if paper.summary:
+        lines += [f"[Existing summary]: {paper.summary}", ""]
+
+    if paper.tldr:
+        lines += [f"S2 TLDR: {paper.tldr}", ""]
+
+    if paper.abstract:
+        lines += ["ABSTRACT:", paper.abstract, ""]
+
+    if fulltext:
+        # Include first 3000 chars of full text for richer summaries
+        lines += [
+            "FULL TEXT (excerpt):",
+            fulltext[:3000] + ("..." if len(fulltext) > 3000 else ""),
+            "",
+        ]
+
+    if paper.notes:
+        lines += [f"Your notes: {paper.notes[:500]}", ""]
+
+    lines += [
+        "─" * 60,
+        "Write a comprehensive 150-300 word summary covering:",
+        "  1. Research question / objective",
+        "  2. Methodology and approach",
+        "  3. Key results and contributions",
+        "  4. Significance to the field",
+        "",
+        f"Then call: store_summary('{paper_id}', '<your summary>')",
+    ]
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def store_summary(paper_id: str, summary: str) -> str:
+    """Store a Claude-generated comprehensive summary for a paper.
+
+    Args:
+        paper_id: The paper's Semantic Scholar ID
+        summary: The comprehensive summary text
+    """
+    ok = await db.update_paper(paper_id, summary=summary)
+    return "Summary stored." if ok else "Paper not found."
+
+
+@mcp.tool()
+async def extract_key_findings(paper_id: str) -> str:
+    """Return a paper's content for key-findings extraction.
+
+    Returns abstract + summary + extraction data formatted for you to
+    identify the 3-7 most important findings. After extracting, call
+    store_key_findings(paper_id, findings) to persist them.
+
+    Args:
+        paper_id: The paper's Semantic Scholar ID
+    """
+    paper = await db.get_paper(paper_id)
+    if not paper:
+        return "Paper not found in library."
+
+    fulltext = await db.get_fulltext(paper_id)
+    authors = ", ".join(a.name for a in paper.authors[:3])
+
+    lines = [
+        "KEY FINDINGS EXTRACTION",
+        f"Title: {paper.title}",
+        f"Authors: {authors} ({paper.year or '?'})",
+        "",
+    ]
+
+    if paper.abstract:
+        lines += ["Abstract:", paper.abstract, ""]
+    if paper.summary:
+        lines += ["Summary:", paper.summary, ""]
+    if fulltext:
+        lines += ["Full text (excerpt):", fulltext[:2000] + "...", ""]
+    if paper.methodology:
+        lines += [f"Methodology: {paper.methodology}"]
+    if paper.convergence_bounds:
+        lines += [f"Convergence bounds: {paper.convergence_bounds}"]
+
+    if paper.key_findings:
+        lines += ["", "Existing findings:", ""]
+        for i, f in enumerate(paper.key_findings, 1):
+            lines.append(f"  {i}. {f}")
+
+    lines += [
+        "",
+        "─" * 60,
+        "Extract 3-7 key findings as a comma-separated list of concise statements.",
+        "Focus on: novel contributions, quantitative results, theoretical insights.",
+        "",
+        f"Then call: store_key_findings('{paper_id}', 'finding 1, finding 2, ...')",
+    ]
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def store_key_findings(paper_id: str, findings: str) -> str:
+    """Store key findings for a paper.
+
+    Args:
+        paper_id: The paper's Semantic Scholar ID
+        findings: Comma-separated key findings
+    """
+    parsed = [f.strip() for f in findings.split(",") if f.strip()]
+    ok = await db.update_paper(paper_id, key_findings=parsed)
+    return f"Stored {len(parsed)} key findings." if ok else "Paper not found."
+
+
+@mcp.tool()
+async def assess_quality(paper_id: str) -> str:
+    """Return a paper's metadata for quality and rigor assessment.
+
+    Returns bibliometric data + abstract for you to evaluate the paper's
+    methodological rigor, reproducibility, and scholarly impact.
+    After assessing, call store_quality(paper_id, score, notes).
+
+    Args:
+        paper_id: The paper's Semantic Scholar ID
+    """
+    paper = await db.get_paper(paper_id)
+    if not paper:
+        return "Paper not found in library."
+
+    authors = ", ".join(a.name for a in paper.authors[:4])
+
+    lines = [
+        "QUALITY ASSESSMENT",
+        f"Title: {paper.title}",
+        f"Authors: {authors} ({paper.year or '?'})",
+        f"Venue: {paper.venue or 'Unknown venue'}",
+        f"Citation count: {paper.citation_count or 0}",
+        f"Is open access: {'Yes' if paper.pdf_url else 'Unknown'}",
+        "",
+    ]
+
+    if paper.abstract:
+        lines += ["Abstract:", paper.abstract[:500], ""]
+    if paper.methodology:
+        lines += [f"Methodology: {paper.methodology}"]
+    if paper.limitations:
+        lines += [f"Known limitations: {paper.limitations}"]
+    if paper.math_framework:
+        lines += [f"Math framework: {paper.math_framework}"]
+
+    if paper.quality_score:
+        lines += [f"\n[Existing assessment]: {paper.quality_score}/5 — {paper.quality_notes}"]
+
+    lines += [
+        "",
+        "─" * 60,
+        "Rate this paper 1-5 on overall quality/rigor:",
+        "  5 = Landmark paper, rigorous methodology, highly reproducible",
+        "  4 = Strong contribution, sound methodology, minor gaps",
+        "  3 = Solid work, standard methodology, some limitations",
+        "  2 = Weak methodology or limited evidence, significant gaps",
+        "  1 = Poor quality, unreliable, or methodologically flawed",
+        "",
+        "Consider: venue reputation, citation trajectory, methodological rigor,",
+        "reproducibility, theoretical soundness, empirical validation.",
+        "",
+        f"Then call: store_quality('{paper_id}', <score>, '<brief justification>')",
+    ]
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def store_quality(paper_id: str, score: int, notes: str) -> str:
+    """Store a quality assessment score and justification.
+
+    Args:
+        paper_id: The paper's Semantic Scholar ID
+        score: Quality score 1-5
+        notes: Brief justification for the score
+    """
+    if score < 1 or score > 5:
+        return "Score must be 1-5."
+    ok = await db.update_paper(paper_id, quality_score=score, quality_notes=notes)
+    return f"Quality assessment stored: {score}/5." if ok else "Paper not found."
+
+
+# ── Stage 3: Organise (Oxford Three-Move + Themes) ──────────────────
+
+
+@mcp.tool()
+async def classify_moves(
+    pillar: Optional[str] = None,
+    chapter: Optional[str] = None,
+) -> str:
+    """Format papers for Oxford three-move classification.
+
+    Returns all papers in scope with their metadata, summaries, and citation
+    counts, formatted for you to classify each as:
+
+    - FOUNDATIONAL: Established work, uncontroversial, high citations, older
+    - GAP: Identifies problems, questions current knowledge, highlights limitations
+    - PARALLEL: Recent attempts to address gaps, newer methodologies, unverified conclusions
+
+    After classifying, call set_move(paper_id, move) for each paper.
+
+    Args:
+        pillar: Limit to a research pillar
+        chapter: Limit to a chapter/section
+    """
+    papers = await db.list_papers(pillar=pillar, chapter=chapter, sort_by="year", limit=200)
+
+    if not papers:
+        return "No papers found. Add papers first."
+
+    lines = [
+        "OXFORD THREE-MOVE CLASSIFICATION",
+        "",
+        "The Oxford literature review model organises papers into three moves:",
+        "  1. FOUNDATIONAL — Established facts, frameworks, widely-cited older work",
+        "  2. GAP — Papers questioning current knowledge, identifying problems/limitations",
+        "  3. PARALLEL — Recent research attempting to fill gaps, newer methodologies",
+        "",
+        "This ordering creates a narrative: established knowledge → what's missing → what's new.",
+        "─" * 60,
+    ]
+
+    for i, p in enumerate(papers, 1):
+        authors = ", ".join(a.name for a in p.authors[:2])
+        current_move = f" [currently: {p.move.value}]" if p.move else ""
+
+        lines.append(f"\n[{i}] {p.title} ({p.year or '?'}){current_move}")
+        lines.append(f"     Authors: {authors} | Citations: {p.citation_count or 0}")
+        if p.summary:
+            lines.append(f"     Summary: {p.summary[:200]}...")
+        elif p.tldr:
+            lines.append(f"     TLDR: {p.tldr}")
+        if p.methodology:
+            lines.append(f"     Method: {p.methodology}")
+        lines.append(f"     Classification: ?")
+
+    lines += [
+        "",
+        "─" * 60,
+        "For each paper, assign: foundational | gap | parallel",
+        "Then call set_move(paper_id, 'foundational') etc. for each.",
+    ]
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def set_move(paper_id: str, move: str) -> str:
+    """Classify a paper into an Oxford three-move category.
+
+    Args:
+        paper_id: The paper's Semantic Scholar ID
+        move: One of: foundational, gap, parallel
+    """
+    try:
+        m = Move(move)
+    except ValueError:
+        return f"Invalid move. Choose from: {', '.join(m.value for m in Move)}"
+
+    ok = await db.update_paper(paper_id, move=move)
+    return f"Move set to '{move}'." if ok else "Paper not found."
+
+
+@mcp.tool()
+async def set_themes(paper_id: str, themes: str) -> str:
+    """Assign thematic tags to a paper (separate from regular tags).
+
+    Themes represent the conceptual strands running through your review,
+    corresponding to the 'multiple research topics' in the Oxford model.
+
+    Args:
+        paper_id: The paper's Semantic Scholar ID
+        themes: Comma-separated theme names (e.g. 'BSDE solvers,convergence theory,neural networks')
+    """
+    parsed = [t.strip() for t in themes.split(",") if t.strip()]
+    ok = await db.update_paper(paper_id, themes=parsed)
+    return f"Themes set: {', '.join(parsed)}" if ok else "Paper not found."
+
+
+@mcp.tool()
+async def generate_synthesis_matrix(
+    paper_ids: Optional[str] = None,
+    pillar: Optional[str] = None,
+    chapter: Optional[str] = None,
+    dimensions: str = "methodology,math_framework,limitations,convergence_bounds,key_findings",
+) -> str:
+    """Generate a structured synthesis matrix comparing papers across dimensions.
+
+    Returns a formatted comparison table showing how each paper addresses
+    each dimension. Essential for identifying patterns, contradictions,
+    and gaps across the literature.
+
+    Args:
+        paper_ids: Comma-separated IDs (or use pillar/chapter to select a group)
+        pillar: Select all papers in this pillar
+        chapter: Select all papers in this chapter
+        dimensions: Comma-separated fields to compare (default: all extraction fields + key_findings)
+    """
+    if paper_ids:
+        ids = [pid.strip() for pid in paper_ids.split(",")]
+        papers = [p for pid in ids if (p := await db.get_paper(pid))]
+    else:
+        papers = await db.list_papers(pillar=pillar, chapter=chapter, sort_by="year", limit=50)
+
+    if not papers:
+        return "No papers found."
+
+    dims = [d.strip() for d in dimensions.split(",")]
+
+    lines = [
+        f"SYNTHESIS MATRIX — {len(papers)} papers × {len(dims)} dimensions",
+        "─" * 60,
+    ]
+
+    for p in papers:
+        cite = (p.authors[0].name.split()[-1] if p.authors else "?") + str(p.year or "")
+        lines.append(f"\n[{cite}] {p.title}")
+        for dim in dims:
+            if dim == "key_findings":
+                val = "; ".join(p.key_findings) if p.key_findings else "—"
+            else:
+                val = getattr(p, dim, None) or "—"
+            lines.append(f"  {dim}: {val}")
+
+    lines += [
+        "",
+        "─" * 60,
+        "Use this matrix to identify:",
+        "  - Common methodological approaches vs. outliers",
+        "  - Contradictions between papers on the same question",
+        "  - Dimensions where most cells are empty (under-explored areas)",
+        "  - Patterns that suggest thematic groupings",
+    ]
+
+    return "\n".join(lines)
+
+
+# ── Stage 4: Structure & Write ──────────────────────────────────────
+
+
+@mcp.tool()
+async def generate_review_outline(
+    research_question: str,
+    structure_style: str = "parallel",
+    themes: Optional[str] = None,
+) -> str:
+    """Generate a literature review outline following the Oxford model.
+
+    Returns your library statistics, move classifications, and theme
+    distribution, then asks you to propose a structured outline.
+
+    Three Oxford organisational styles:
+    - BLOCK:    Topic A (found→gap→parallel), Topic B (found→gap→parallel), Conclude
+    - PARALLEL: All foundational (A+B), All gaps (A+B), All parallel (A+B), Conclude
+    - MIXED:    Topic A (found+gap), Topic B (found+gap), Parallel (A+B), Conclude
+
+    After proposing the outline, use assign_chapter() to map papers to sections,
+    then run assemble_review() to draft the complete review.
+
+    Args:
+        research_question: The central question driving the review
+        structure_style: 'block', 'parallel', or 'mixed' (default: parallel)
+        themes: Comma-separated theme names to structure around (auto-detected if omitted)
+    """
+    papers = await db.list_papers(sort_by="year", limit=200)
+    stats = await db.library_stats()
+
+    if not papers:
+        return "Library is empty. Add papers first."
+
+    # Count by move
+    move_counts: dict[str, int] = {"foundational": 0, "gap": 0, "parallel": 0, "unclassified": 0}
+    for p in papers:
+        m = p.move.value if p.move else "unclassified"
+        move_counts[m] = move_counts.get(m, 0) + 1
+
+    # Discover themes
+    all_themes: dict[str, int] = {}
+    for p in papers:
+        for t in (p.themes or []):
+            all_themes[t] = all_themes.get(t, 0) + 1
+
+    if themes:
+        requested_themes = [t.strip() for t in themes.split(",")]
+    else:
+        requested_themes = sorted(all_themes.keys(), key=lambda t: -all_themes[t])[:5]
+
+    lines = [
+        "LITERATURE REVIEW OUTLINE GENERATOR",
+        f"Research Question: {research_question}",
+        f"Structure Style: {structure_style.upper()}",
+        f"Library: {len(papers)} papers",
+        "",
+        "── MOVE DISTRIBUTION ──",
+        f"  Foundational: {move_counts['foundational']}",
+        f"  Gap:          {move_counts['gap']}",
+        f"  Parallel:     {move_counts['parallel']}",
+        f"  Unclassified: {move_counts['unclassified']}",
+    ]
+
+    if move_counts["unclassified"] > 0:
+        lines.append(f"  → Run classify_moves() to classify the {move_counts['unclassified']} unclassified papers")
+
+    lines += ["", "── THEMES ──"]
+    if requested_themes:
+        for t in requested_themes:
+            lines.append(f"  {t}: {all_themes.get(t, 0)} papers")
+    else:
+        lines.append("  No themes assigned yet. Use set_themes() to assign thematic tags.")
+
+    lines += ["", "── PILLAR DISTRIBUTION ──"]
+    for pillar, count in stats["by_pillar"].items():
+        lines.append(f"  {pillar}: {count}")
+
+    # Style explanation
+    style_desc = {
+        "block": (
+            "BLOCK STYLE: Complete each theme before moving to the next.\n"
+            "  Section 1: Introduction (general foundations)\n"
+            "  Section 2: Theme A — foundational → gap → parallel research\n"
+            "  Section 3: Theme B — foundational → gap → parallel research\n"
+            "  Section N: Conclusion — link knowns, summarise unknowns, justify your research"
+        ),
+        "parallel": (
+            "PARALLEL STYLE: Group by move type across all themes.\n"
+            "  Section 1: Introduction (general foundations)\n"
+            "  Section 2: Foundational knowledge (Theme A + B + ...)\n"
+            "  Section 3: Establishing gaps (Theme A + B + ...)\n"
+            "  Section 4: Parallel research (Theme A + B + ...)\n"
+            "  Section 5: Conclusion — link knowns, summarise unknowns, justify your research"
+        ),
+        "mixed": (
+            "MIXED STYLE: Foundational + gap per theme, then parallel across all.\n"
+            "  Section 1: Introduction (general foundations)\n"
+            "  Section 2: Theme A — foundational + gap identification\n"
+            "  Section 3: Theme B — foundational + gap identification\n"
+            "  Section 4: Parallel research across all themes\n"
+            "  Section 5: Conclusion — link knowns, summarise unknowns, justify your research"
+        ),
+    }
+    lines += [
+        "",
+        "── RECOMMENDED STRUCTURE ──",
+        style_desc.get(structure_style, style_desc["parallel"]),
+    ]
+
+    lines += [
+        "",
+        "─" * 60,
+        "TASK: Propose a detailed outline with ~4-7 sections.",
+        "For each section, specify:",
+        "  - Section title",
+        "  - Driving question",
+        "  - Which papers belong (by ID or theme/move/pillar)",
+        "  - Approximate word target",
+        "",
+        "After the outline is approved, run assign_chapter() for each paper,",
+        "then run assemble_review() to draft the complete review.",
+    ]
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def assemble_review(
+    sections_json: str,
+    word_target: int = 3000,
+    research_question: Optional[str] = None,
+) -> str:
+    """Assemble a complete literature review from a structured outline.
+
+    Takes a JSON array of sections, each with a chapter name and driving
+    question. For each section, pulls the relevant papers from the library
+    and formats the full context for drafting.
+
+    Args:
+        sections_json: JSON array like:
+            [
+              {"chapter": "introduction", "question": "What is the research landscape?", "words": 400},
+              {"chapter": "bsde_methods", "question": "How have deep learning methods been applied?", "words": 800},
+              ...
+            ]
+        word_target: Total target word count across all sections (default 3000)
+        research_question: The overarching research question (for intro/conclusion framing)
+    """
+    try:
+        sections = json.loads(sections_json)
+    except json.JSONDecodeError:
+        return "Invalid JSON. Provide a JSON array of {chapter, question, words} objects."
+
+    if not sections:
+        return "Empty sections list."
+
+    lines = [
+        "COMPLETE LITERATURE REVIEW ASSEMBLY",
+        f"Sections: {len(sections)}",
+        f"Target: ~{word_target} words total",
+        "",
+    ]
+
+    if research_question:
+        lines += [f"Overarching question: {research_question}", ""]
+
+    lines += [
+        "INSTRUCTIONS:",
+        "Write the complete literature review as a single, cohesive document.",
+        "Use [AuthorYear] inline citations throughout.",
+        "Each section should flow naturally into the next with transition sentences.",
+        "The overall arc should follow: established knowledge → gaps → recent advances → justification for new research.",
+        "─" * 60,
+        "",
+    ]
+
+    for i, section in enumerate(sections):
+        chap = section.get("chapter", f"section_{i}")
+        question = section.get("question", "")
+        words = section.get("words", word_target // len(sections))
+
+        # Fetch papers for this section
+        papers = await db.list_papers(chapter=chap, sort_by="year", limit=50)
+
+        lines.append(f"═══ SECTION {i+1}: {chap.replace('_', ' ').title()} (~{words} words) ═══")
+        if question:
+            lines.append(f"Driving question: {question}")
+        lines.append("")
+
+        if not papers:
+            lines.append(f"  [No papers assigned to chapter '{chap}'. Use assign_chapter() first.]")
+            lines.append("")
+            continue
+
+        # Group by move
+        by_move: dict[str, list] = {"foundational": [], "gap": [], "parallel": [], "unclassified": []}
+        for p in papers:
+            m = p.move.value if p.move else "unclassified"
+            by_move[m].append(p)
+
+        for move_name, move_papers in by_move.items():
+            if not move_papers:
+                continue
+            lines.append(f"  ── {move_name.upper()} ({len(move_papers)} papers) ──")
+            for p in move_papers:
+                cite = (p.authors[0].name.split()[-1] if p.authors else "?") + str(p.year or "")
+                lines.append(f"  [{cite}] {p.title}")
+                if p.summary:
+                    lines.append(f"    Summary: {p.summary[:250]}...")
+                elif p.abstract:
+                    lines.append(f"    Abstract: {p.abstract[:250]}...")
+                if p.key_findings:
+                    lines.append(f"    Key findings: {'; '.join(p.key_findings[:3])}")
+                if p.methodology:
+                    lines.append(f"    Method: {p.methodology}")
+                if p.limitations:
+                    lines.append(f"    Limitations: {p.limitations}")
+                lines.append("")
+
+        lines.append("")
+
+    lines += [
+        "─" * 60,
+        "Now write the complete literature review as one continuous document.",
+        "Include all sections with smooth transitions between them.",
+        "End with a conclusion that synthesises the gaps and justifies further research.",
+    ]
 
     return "\n".join(lines)
 

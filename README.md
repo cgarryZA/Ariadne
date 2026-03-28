@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <strong>A local, self-hosted literature review system for Claude Code.</strong><br>
-  Search papers, build an annotated library, map citation networks, extract structured information, and export BibTeX — all from inside Claude without switching to Elicit, SciSpace, Connected Papers, or Zotero.
+  <strong>Research question → complete literature review, powered by Claude Code.</strong><br>
+  An open-source MCP server that turns Claude into a full academic research assistant.
 </p>
 
 <p align="center">
@@ -13,31 +13,59 @@
 
 ---
 
+## How it works
+
+You give Claude a research question. Ariadne handles the rest.
+
+**1. You ask a question** — *"What deep learning methods exist for solving high-dimensional BSDEs?"*
+
+**2. Claude searches the literature** — Queries Semantic Scholar, OpenAlex, and arXiv simultaneously. Finds relevant papers, follows citation trails, discovers connected work you'd never find manually.
+
+**3. You screen and filter** — Claude reads every abstract and applies your criteria: what's relevant, what's not, what needs a closer look. Papers that don't make the cut are tagged out. A PRISMA audit trail is generated automatically.
+
+**4. Claude reads and analyses** — For each paper that passes screening, Claude writes a comprehensive summary, extracts key findings, evaluates methodological quality, and fills in structured comparison fields (methodology, limitations, convergence bounds, mathematical framework).
+
+**5. You organise the literature** — Papers are classified into the Oxford three-move framework:
+- **Foundational** — the established, uncontroversial work everyone cites
+- **Gap** — papers that identify what's missing or broken
+- **Parallel** — recent attempts to fill those gaps
+
+Papers are also grouped by theme, so multi-topic reviews are natively supported.
+
+**6. Claude writes the review** — You choose a structure (Block, Parallel, or Mixed style per the [Oxford guide](https://lifelong-learning.ox.ac.uk/about/writing-literature-reviews)), approve an outline, and Claude drafts the complete literature review with inline `[AuthorYear]` citations and smooth transitions between sections.
+
+**7. You export** — BibTeX file generated for every cited paper.
+
+Everything Claude discovers and writes is stored locally in a SQLite database — summaries, findings, quality scores, and move classifications persist across sessions and compound over time.
+
+---
+
 ## What it replaces
 
-| Tool | Ariadne equivalent |
-|------|-------------------|
-| **Elicit** | `search_papers` + `set_extraction` (methodology, limitations, convergence bounds) |
-| **Connected Papers / LitMaps** | `get_citations`, `get_references`, `find_related`, `find_bridges` |
-| **SciSpace** | `get_paper_details` + Claude reading the abstract directly |
-| **Paper Digest** | Semantic Scholar TLDR exposed on every search result |
-| **Zotero** | SQLite library + `export_bibtex`, `import_from_bibtex` |
-| **NotebookLM** | `annotate`, `compare_papers` + Claude synthesis |
+| Paid tool | What Ariadne does instead |
+|-----------|--------------------------|
+| **Elicit** | Searches 680M+ papers across 3 databases, extracts structured fields, builds comparison matrices |
+| **Connected Papers / LitMaps** | Crawls citation networks, finds cross-pillar bridge papers, monitors for new citations |
+| **SciSpace DeepReview** | Drafts complete review sections from your library with full context and citations |
+| **Consensus** | Synthesises evidence across papers on yes/no research questions |
+| **Paper Digest** | Auto-summarises every paper with AI-generated TLDR + your own Claude summaries |
+| **Zotero** | Local SQLite library with tags, pillars, chapters, reading status, BibTeX export |
+| **NotebookLM** | Annotates papers, compares approaches, identifies research gaps |
 
 ---
 
 ## Quick Start
 
-### 1. Install dependencies
+### 1. Install
 
 ```bash
 pip install fastmcp httpx aiosqlite pydantic
 
-# Optional: Streamlit dashboard
+# Optional: visual dashboard
 pip install streamlit networkx pyvis
 ```
 
-### 2. Configure Claude Code
+### 2. Connect to Claude Code
 
 Add to your project's `.mcp.json`:
 
@@ -55,11 +83,11 @@ Add to your project's `.mcp.json`:
 }
 ```
 
-> **Semantic Scholar API key** is optional but recommended — it raises your rate limit from 1 RPS to 10 RPS. Get a free key at [semanticscholar.org/product/api](https://www.semanticscholar.org/product/api).
+> **Semantic Scholar API key** is optional but recommended — raises your rate limit from 1 to 10 requests/second. Get one free at [semanticscholar.org/product/api](https://www.semanticscholar.org/product/api).
 
 ### 3. Start using it
 
-In Claude Code, just ask naturally:
+Just talk to Claude naturally:
 
 ```
 Search for papers on transformer attention mechanisms from 2020 onwards
@@ -68,12 +96,36 @@ Search for papers on transformer attention mechanisms from 2020 onwards
 Add this paper to my library: ARXIV:1706.03762
 ```
 ```
-What are the most cited papers that cite Han et al. 2018?
+Do a full literature review on mean-field game theory applied to financial markets
 ```
 
 ---
 
-## MCP Tools Reference (39 tools)
+## The Pipeline (technical detail)
+
+For those who want to understand or customise the workflow:
+
+```
+1. DEFINE     →  generate_search_strategy(question)
+2. DISCOVER   →  multi_search() + add_paper() + build_citation_network()
+3. SCREEN     →  screen_papers(include/exclude criteria) → generate_prisma_report()
+4. ANALYSE    →  summarize_paper() → extract_key_findings() → assess_quality()
+5. ORGANISE   →  set_themes() → classify_moves() → generate_synthesis_matrix()
+6. STRUCTURE  →  generate_review_outline(question, style) → assign_chapter()
+7. WRITE      →  assemble_review(outline) → complete literature review with citations
+8. EXPORT     →  export_bibtex()
+```
+
+The Oxford three-move model structures the output:
+- **Foundational** — established facts, widely-cited older work
+- **Gap** — papers questioning current knowledge, identifying problems
+- **Parallel** — recent research attempting to fill gaps
+
+Three organisational styles: **Block** (complete each topic before the next), **Parallel** (all foundational, then all gaps, then all parallel), **Mixed** (foundational+gap per topic, parallel across all). Based on the [Oxford guide for multi-topic literature reviews](https://lifelong-learning.ox.ac.uk/about/writing-literature-reviews).
+
+---
+
+## MCP Tools Reference (52 tools)
 
 ### Discovery — Find phase
 | Tool | Description |
@@ -145,6 +197,35 @@ What are the most cited papers that cite Han et al. 2018?
 | Tool | Description |
 |------|-------------|
 | `download_pdf(paper_id)` | Download open-access PDF; extracts text if pdfplumber installed |
+
+### Pipeline — Define
+| Tool | Description |
+|------|-------------|
+| `generate_search_strategy(research_question, field, num_themes)` | Generate systematic search strategy with queries per theme |
+
+### Pipeline — Read & Analyse
+| Tool | Description |
+|------|-------------|
+| `summarize_paper(paper_id)` | Format paper for comprehensive summarisation |
+| `store_summary(paper_id, summary)` | Persist Claude-generated summary |
+| `extract_key_findings(paper_id)` | Format paper for key-findings extraction |
+| `store_key_findings(paper_id, findings)` | Persist extracted findings |
+| `assess_quality(paper_id)` | Format paper for quality/rigor assessment |
+| `store_quality(paper_id, score, notes)` | Persist quality score (1-5) and justification |
+
+### Pipeline — Organise (Oxford three-move)
+| Tool | Description |
+|------|-------------|
+| `classify_moves(pillar, chapter)` | Format papers for foundational/gap/parallel classification |
+| `set_move(paper_id, move)` | Store Oxford move classification |
+| `set_themes(paper_id, themes)` | Assign thematic tags (separate from regular tags) |
+| `generate_synthesis_matrix(paper_ids, dimensions)` | Cross-paper comparison table |
+
+### Pipeline — Structure & Write
+| Tool | Description |
+|------|-------------|
+| `generate_review_outline(research_question, structure_style, themes)` | Propose outline using Block/Parallel/Mixed Oxford style |
+| `assemble_review(sections_json, word_target, research_question)` | Draft complete literature review from structured outline |
 
 ---
 

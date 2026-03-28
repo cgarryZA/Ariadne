@@ -40,7 +40,13 @@ CREATE TABLE IF NOT EXISTS papers (
     limitations TEXT,
     math_framework TEXT,
     convergence_bounds TEXT,
-    chapter TEXT
+    chapter TEXT,
+    summary TEXT,
+    key_findings TEXT,
+    quality_score INTEGER,
+    quality_notes TEXT,
+    move TEXT,
+    themes TEXT
 );
 
 CREATE TABLE IF NOT EXISTS citations (
@@ -83,6 +89,8 @@ def _parse(row: sqlite3.Row) -> dict:
     d = dict(row)
     d["authors"] = json.loads(d["authors"]) if d["authors"] else []
     d["tags"] = json.loads(d["tags"]) if d["tags"] else []
+    d["key_findings"] = json.loads(d["key_findings"]) if d.get("key_findings") else []
+    d["themes"] = json.loads(d["themes"]) if d.get("themes") else []
     return d
 
 
