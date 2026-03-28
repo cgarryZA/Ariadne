@@ -8,29 +8,11 @@ from typing import Optional
 
 import httpx
 
+from models import Author, Citation, SearchResult
+
 
 MAX_RETRIES = 6
 BASE_DELAY = 5.0  # seconds — generous for free tier
-
-
-async def _request_with_retry(method: str, url: str, **kwargs) -> httpx.Response:
-    """Make an HTTP request with exponential backoff on 429 rate limits."""
-    for attempt in range(MAX_RETRIES):
-        async with httpx.AsyncClient(timeout=30) as client:
-            if method == "GET":
-                resp = await client.get(url, **kwargs)
-            else:
-                resp = await client.post(url, **kwargs)
-        if resp.status_code == 429 and attempt < MAX_RETRIES - 1:
-            delay = BASE_DELAY * (2 ** attempt)
-            await asyncio.sleep(delay)
-            continue
-        resp.raise_for_status()
-        return resp
-    resp.raise_for_status()
-    return resp
-
-from models import Author, Citation, SearchResult
 
 BASE_URL = "https://api.semanticscholar.org/graph/v1"
 RECS_URL = "https://api.semanticscholar.org/recommendations/v1"
@@ -46,12 +28,50 @@ CITATION_FIELDS = (
     "isOpenAccess,contexts,isInfluential"
 )
 
+# ---------------------------------------------------------------------------
+# Shared HTTP client (reused across requests for connection pooling)
+# ---------------------------------------------------------------------------
+
+_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(timeout=30)
+    return _client
+
+
+async def close_client() -> None:
+    global _client
+    if _client is not None and not _client.is_closed:
+        await _client.aclose()
+        _client = None
+
 
 def _headers() -> dict[str, str]:
     key = os.environ.get("S2_API_KEY")
     if key:
         return {"x-api-key": key}
     return {}
+
+
+async def _request_with_retry(method: str, url: str, **kwargs) -> httpx.Response:
+    """Make an HTTP request with exponential backoff on 429 rate limits."""
+    client = _get_client()
+    for attempt in range(MAX_RETRIES):
+        if method == "GET":
+            resp = await client.get(url, **kwargs)
+        else:
+            resp = await client.post(url, **kwargs)
+        if resp.status_code == 429 and attempt < MAX_RETRIES - 1:
+            delay = BASE_DELAY * (2 ** attempt)
+            await asyncio.sleep(delay)
+            continue
+        resp.raise_for_status()
+        return resp
+    resp.raise_for_status()
+    return resp
 
 
 def _parse_search_result(data: dict, library_ids: set[str] | None = None) -> SearchResult:
@@ -141,7 +161,13 @@ async def find_related(
     paper_id: str, limit: int = 10, library_ids: Optional[set[str]] = None,
 ) -> list[SearchResult]:
     """Get S2 recommended papers based on a given paper."""
-    resp = await _request_with_retry("POST", f"{RECS_URL}/papers/", json={"positivePaperIds": [paper_id]}, params={"fields": PAPER_FIELDS, "limit": min(limit, 100)}, headers=_headers())
+    # Use the single-paper recommendations endpoint (more reliable)
+    resp = await _request_with_retry(
+        "GET",
+        f"{RECS_URL}/papers/forpaper/{paper_id}",
+        params={"fields": PAPER_FIELDS, "limit": min(limit, 100)},
+        headers=_headers(),
+    )
     data = resp.json()
 
     return [_parse_search_result(p, library_ids) for p in data.get("recommendedPapers", [])]

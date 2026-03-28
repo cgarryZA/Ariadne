@@ -9,12 +9,6 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
-class Pillar(str, Enum):
-    PURE_MATH = "pure_math"
-    COMPUTATIONAL = "computational"
-    FINANCIAL = "financial"
-
-
 class ReadingStatus(str, Enum):
     UNREAD = "unread"
     SKIMMED = "skimmed"
@@ -52,7 +46,7 @@ class Paper(BaseModel):
     added_at: Optional[datetime] = None
 
     # User-managed fields
-    pillar: Optional[Pillar] = None
+    pillar: Optional[str] = None  # Free-text — configured per review via setup_review()
     tags: list[str] = Field(default_factory=list)
     status: ReadingStatus = ReadingStatus.UNREAD
     relevance: Optional[int] = Field(None, ge=1, le=5)

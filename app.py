@@ -30,30 +30,50 @@ st.set_page_config(
 # Design tokens
 # ─────────────────────────────────────────────────────────────────────────────
 
-PILLAR_HEX = {
-    "pure_math":     "#58a6ff",
-    "computational": "#3fb950",
-    "financial":     "#f78166",
-    "unassigned":    "#6e7681",
-}
-PILLAR_BG = {
-    "pure_math":     "#0d2a4a",
-    "computational": "#0d2f1a",
-    "financial":     "#2f1212",
-    "unassigned":    "#161b22",
-}
-PILLAR_LABEL = {
-    "pure_math":     "Pure Math",
-    "computational": "Computational",
-    "financial":     "Financial",
-    "unassigned":    "Unassigned",
-}
-PILLAR_ICON = {
-    "pure_math":     "∂",
-    "computational": "λ",
-    "financial":     "₿",
-    "unassigned":    "·",
-}
+# Dynamic pillar configuration — reads from DB config table
+# Color palette for dynamically generated pillar colors
+_PILLAR_PALETTE = [
+    ("#58a6ff", "#0d2a4a"),  # blue
+    ("#3fb950", "#0d2f1a"),  # green
+    ("#f78166", "#2f1212"),  # orange
+    ("#d2a8ff", "#1f1231"),  # purple
+    ("#f0883e", "#2f1a0d"),  # amber
+    ("#79c0ff", "#0d2a4a"),  # light blue
+    ("#56d364", "#0d2f1a"),  # light green
+    ("#ffa657", "#2f1a0d"),  # peach
+]
+_PILLAR_ICONS = ["∂", "λ", "₿", "φ", "Σ", "Δ", "Ω", "π"]
+
+
+def _build_pillar_dicts():
+    """Build pillar design tokens from configured pillars + any found in papers."""
+    configured = db.get_pillars()
+    # Also discover pillars actually used in the database
+    if db.db_exists():
+        all_papers = db.get_all_papers()
+        used_pillars = {p.get("pillar") for p in all_papers if p.get("pillar")}
+    else:
+        used_pillars = set()
+
+    # Merge configured + used
+    pillars = list(dict.fromkeys(configured + sorted(used_pillars - set(configured))))
+
+    hex_map = {"unassigned": "#6e7681"}
+    bg_map = {"unassigned": "#161b22"}
+    label_map = {"unassigned": "Unassigned"}
+    icon_map = {"unassigned": "·"}
+
+    for i, p in enumerate(pillars):
+        idx = i % len(_PILLAR_PALETTE)
+        hex_map[p] = _PILLAR_PALETTE[idx][0]
+        bg_map[p] = _PILLAR_PALETTE[idx][1]
+        label_map[p] = p.replace("_", " ").title()
+        icon_map[p] = _PILLAR_ICONS[idx] if idx < len(_PILLAR_ICONS) else "·"
+
+    return hex_map, bg_map, label_map, icon_map
+
+
+PILLAR_HEX, PILLAR_BG, PILLAR_LABEL, PILLAR_ICON = _build_pillar_dicts()
 
 STATUS_HEX = {
     "unread":    "#6e7681",
@@ -74,10 +94,19 @@ STATUS_DOT = {
     "deep_read": "●",
 }
 
-CHAPTERS = [
-    "", "introduction", "mathematical_framework",
-    "numerical_methodology", "empirical_results", "conclusion", "appendix",
-]
+def _build_chapters():
+    """Build chapter list from papers actually in the database."""
+    base = ["", "introduction", "background", "methodology", "results", "conclusion", "appendix"]
+    if db.db_exists():
+        all_papers = db.get_all_papers()
+        used = {p.get("chapter") for p in all_papers if p.get("chapter")}
+        for ch in sorted(used):
+            if ch not in base:
+                base.insert(-1, ch)  # Insert before "appendix"
+    return base
+
+
+CHAPTERS = _build_chapters()
 
 MOVE_HEX = {
     "foundational": "#58a6ff",

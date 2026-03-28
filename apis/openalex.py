@@ -27,15 +27,35 @@ WORK_FIELDS = (
     "abstract_inverted_index,cited_by_count,doi,ids,open_access,best_oa_location"
 )
 
+# ---------------------------------------------------------------------------
+# Shared HTTP client
+# ---------------------------------------------------------------------------
+
+_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(timeout=30)
+    return _client
+
+
+async def close_client() -> None:
+    global _client
+    if _client is not None and not _client.is_closed:
+        await _client.aclose()
+        _client = None
+
 
 async def _request_with_retry(method: str, url: str, **kwargs) -> httpx.Response:
     """Make an HTTP request with exponential backoff on 429 rate limits."""
+    client = _get_client()
     for attempt in range(MAX_RETRIES):
-        async with httpx.AsyncClient(timeout=30) as client:
-            if method == "GET":
-                resp = await client.get(url, **kwargs)
-            else:
-                resp = await client.post(url, **kwargs)
+        if method == "GET":
+            resp = await client.get(url, **kwargs)
+        else:
+            resp = await client.post(url, **kwargs)
         if resp.status_code == 429 and attempt < MAX_RETRIES - 1:
             delay = BASE_DELAY * (2 ** attempt)
             await asyncio.sleep(delay)
@@ -47,11 +67,7 @@ async def _request_with_retry(method: str, url: str, **kwargs) -> httpx.Response
 
 
 def _reconstruct_abstract(inverted_index: dict | None) -> str | None:
-    """Reconstruct plain-text abstract from OpenAlex inverted index format.
-
-    OpenAlex stores abstracts as a dict mapping word -> [list of positions].
-    We invert this to recover the original word order.
-    """
+    """Reconstruct plain-text abstract from OpenAlex inverted index format."""
     if not inverted_index:
         return None
     position_map: dict[int, str] = {}
@@ -68,7 +84,11 @@ def _extract_oa_id(openalex_url: str) -> str:
     return openalex_url.rstrip("/").split("/")[-1]
 
 
-def _parse_work(data: dict, library_ids: set[str] | None = None) -> SearchResult:
+def _parse_work(
+    data: dict,
+    library_ids: set[str] | None = None,
+    library_dois: set[str] | None = None,
+) -> SearchResult:
     """Convert an OpenAlex work dict into a SearchResult."""
     raw_id = data.get("id", "")
     bare_id = _extract_oa_id(raw_id) if raw_id else raw_id
@@ -91,6 +111,13 @@ def _parse_work(data: dict, library_ids: set[str] | None = None) -> SearchResult
     oa_info = data.get("open_access") or {}
     is_oa = bool(oa_info.get("is_oa", False))
 
+    # Cross-source library check: match on prefixed OA ID *or* DOI
+    in_lib = prefixed_id in (library_ids or set())
+    if not in_lib and library_dois:
+        doi = data.get("doi")
+        if doi and doi.lower().replace("https://doi.org/", "") in library_dois:
+            in_lib = True
+
     return SearchResult(
         id=prefixed_id,
         title=data.get("title", ""),
@@ -100,7 +127,7 @@ def _parse_work(data: dict, library_ids: set[str] | None = None) -> SearchResult
         abstract=abstract,
         citation_count=data.get("cited_by_count"),
         is_open_access=is_oa,
-        in_library=prefixed_id in (library_ids or set()),
+        in_library=in_lib,
     )
 
 
@@ -114,20 +141,9 @@ async def search_papers(
     limit: int = 10,
     year_range: Optional[str] = None,
     library_ids: Optional[set[str]] = None,
+    library_dois: Optional[set[str]] = None,
 ) -> list[SearchResult]:
-    """Search OpenAlex for papers matching *query*.
-
-    Args:
-        query: Free-text search string.
-        limit: Maximum number of results to return (capped at 200).
-        year_range: Optional year filter, e.g. ``'2018-2024'`` or ``'2020-'``.
-            Passed as ``filter=publication_year:<range>``.
-        library_ids: Set of prefixed IDs already in the local library,
-            used to populate ``in_library`` on each result.
-
-    Returns:
-        List of :class:`SearchResult` objects.
-    """
+    """Search OpenAlex for papers matching *query*."""
     params: dict = {
         **_base_params(),
         "search": query,
@@ -138,7 +154,6 @@ async def search_papers(
 
     filters: list[str] = []
     if year_range:
-        # Accept '2018-2024', '2020-', or '-2024'
         filters.append(f"publication_year:{year_range}")
     if filters:
         params["filter"] = ",".join(filters)
@@ -146,20 +161,11 @@ async def search_papers(
     resp = await _request_with_retry("GET", f"{BASE_URL}/works", params=params)
     data = resp.json()
 
-    return [_parse_work(item, library_ids) for item in data.get("results", [])]
+    return [_parse_work(item, library_ids, library_dois) for item in data.get("results", [])]
 
 
 async def get_paper_by_doi(doi: str) -> dict:
-    """Fetch a single paper by DOI and return fields compatible with ``parse_paper_to_library``.
-
-    Args:
-        doi: A bare DOI string, e.g. ``'10.1145/3219819.3219943'``.
-
-    Returns:
-        Dict with keys: id, title, authors, year, venue, abstract, doi,
-        arxiv_id, url, pdf_url, citation_count, tldr.
-        ``tldr`` is always ``None`` (OpenAlex does not provide TLDRs).
-    """
+    """Fetch a single paper by DOI and return fields compatible with Paper model."""
     encoded_doi = f"doi:{doi}"
     params = {
         **_base_params(),
@@ -186,15 +192,12 @@ async def get_paper_by_doi(doi: str) -> dict:
 
     abstract = _reconstruct_abstract(data.get("abstract_inverted_index"))
 
-    # Extract ArXiv ID from ids dict if present
     ids = data.get("ids") or {}
     arxiv_url = ids.get("arxiv")
     arxiv_id: str | None = None
     if arxiv_url:
-        # ids.arxiv is like "https://arxiv.org/abs/2103.01234"
         arxiv_id = arxiv_url.rstrip("/").split("/")[-1]
 
-    # PDF URL — prefer best_oa_location, fall back to primary_location
     best_oa = data.get("best_oa_location") or {}
     pdf_url = best_oa.get("pdf_url") or primary_location.get("pdf_url") or None
 
@@ -207,7 +210,7 @@ async def get_paper_by_doi(doi: str) -> dict:
         "abstract": abstract,
         "doi": data.get("doi"),
         "arxiv_id": arxiv_id,
-        "url": raw_id or None,  # OpenAlex canonical URL
+        "url": raw_id or None,
         "pdf_url": pdf_url,
         "citation_count": data.get("cited_by_count"),
         "tldr": None,

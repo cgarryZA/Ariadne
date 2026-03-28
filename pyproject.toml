@@ -1,11 +1,11 @@
 [project]
 name = "ariadne"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local MCP-powered academic literature review system — search, annotate, map citations, export BibTeX"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
-keywords = ["literature-review", "mcp", "claude", "academic", "research", "semantic-scholar", "bibtex"]
+keywords = ["literature-review", "mcp", "claude", "academic", "research", "semantic-scholar", "bibtex", "openalex", "arxiv"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -21,9 +21,13 @@ dependencies = [
     "httpx>=0.27.0",
     "aiosqlite>=0.20.0",
     "pydantic>=2.0.0",
+    "bibtexparser>=2.0.0",
 ]
 
 [project.optional-dependencies]
+pdf = [
+    "pdfplumber>=0.10.0",
+]
 dashboard = [
     "streamlit>=1.30.0",
     "networkx>=3.0",
@@ -32,6 +36,9 @@ dashboard = [
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+]
+all = [
+    "ariadne[pdf,dashboard]",
 ]
 
 [project.scripts]

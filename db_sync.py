@@ -75,24 +75,81 @@ CREATE TABLE IF NOT EXISTS pdf_fulltext (
     text TEXT,
     extracted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS config (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 """
+
+# ---------------------------------------------------------------------------
+# Singleton connection
+# ---------------------------------------------------------------------------
+
+_conn: Optional[sqlite3.Connection] = None
 
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA)
-    return conn
+    global _conn
+    if _conn is None:
+        _conn = sqlite3.connect(DB_PATH)
+        _conn.row_factory = sqlite3.Row
+        _conn.executescript(SCHEMA)
+    return _conn
+
+
+def _safe_json_loads(value, default=None):
+    if not value:
+        return default if default is not None else []
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return default if default is not None else []
 
 
 def _parse(row: sqlite3.Row) -> dict:
     d = dict(row)
-    d["authors"] = json.loads(d["authors"]) if d["authors"] else []
-    d["tags"] = json.loads(d["tags"]) if d["tags"] else []
-    d["key_findings"] = json.loads(d["key_findings"]) if d.get("key_findings") else []
-    d["themes"] = json.loads(d["themes"]) if d.get("themes") else []
+    d["authors"] = _safe_json_loads(d.get("authors"), [])
+    d["tags"] = _safe_json_loads(d.get("tags"), [])
+    d["key_findings"] = _safe_json_loads(d.get("key_findings"), [])
+    d["themes"] = _safe_json_loads(d.get("themes"), [])
     return d
 
+
+# ---------------------------------------------------------------------------
+# Config helpers
+# ---------------------------------------------------------------------------
+
+def get_config(key: str) -> Optional[str]:
+    conn = get_conn()
+    row = conn.execute("SELECT value FROM config WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def get_config_json(key: str, default=None):
+    raw = get_config(key)
+    if raw is None:
+        return default
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return default
+
+
+def get_pillars() -> list[str]:
+    """Return configured pillar names."""
+    return get_config_json("pillars", [])
+
+
+def get_extraction_fields() -> list[str]:
+    """Return configured extraction field names."""
+    return get_config_json("extraction_fields",
+                           ["methodology", "limitations", "math_framework", "convergence_bounds"])
+
+
+# ---------------------------------------------------------------------------
+# Paper queries
+# ---------------------------------------------------------------------------
 
 def get_all_papers(
     status: Optional[str] = None,
@@ -101,31 +158,31 @@ def get_all_papers(
     tag: Optional[str] = None,
     sort_by: str = "citation_count",
 ) -> list[dict]:
-    with get_conn() as conn:
-        conditions, params = [], []
-        if status:
-            conditions.append("status = ?"); params.append(status)
-        if pillar:
-            conditions.append("pillar = ?"); params.append(pillar)
-        if chapter:
-            conditions.append("chapter = ?"); params.append(chapter)
-        if tag:
-            conditions.append("tags LIKE ?"); params.append(f'%"{tag}"%')
+    conn = get_conn()
+    conditions, params = [], []
+    if status:
+        conditions.append("status = ?"); params.append(status)
+    if pillar:
+        conditions.append("pillar = ?"); params.append(pillar)
+    if chapter:
+        conditions.append("chapter = ?"); params.append(chapter)
+    if tag:
+        conditions.append("tags LIKE ?"); params.append(f'%"{tag}"%')
 
-        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
-        allowed = {"citation_count", "year", "relevance", "title", "added_at"}
-        col = sort_by if sort_by in allowed else "citation_count"
-        desc = " DESC" if col in ("citation_count", "year", "relevance", "added_at") else ""
-        rows = conn.execute(
-            f"SELECT * FROM papers{where} ORDER BY {col} IS NULL, {col}{desc}",
-            params
-        ).fetchall()
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    allowed = {"citation_count", "year", "relevance", "title", "added_at"}
+    col = sort_by if sort_by in allowed else "citation_count"
+    desc = " DESC" if col in ("citation_count", "year", "relevance", "added_at") else ""
+    rows = conn.execute(
+        f"SELECT * FROM papers{where} ORDER BY {col} IS NULL, {col}{desc}",
+        params
+    ).fetchall()
     return [_parse(r) for r in rows]
 
 
 def get_paper(paper_id: str) -> Optional[dict]:
-    with get_conn() as conn:
-        row = conn.execute("SELECT * FROM papers WHERE id = ?", (paper_id,)).fetchone()
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM papers WHERE id = ?", (paper_id,)).fetchone()
     return _parse(row) if row else None
 
 
@@ -134,42 +191,42 @@ def update_paper(paper_id: str, **fields) -> bool:
         return False
     if "tags" in fields and isinstance(fields["tags"], list):
         fields["tags"] = json.dumps(fields["tags"])
-    with get_conn() as conn:
-        sets = ", ".join(f"{k} = ?" for k in fields)
-        vals = list(fields.values()) + [paper_id]
-        cur = conn.execute(f"UPDATE papers SET {sets} WHERE id = ?", vals)
-        conn.commit()
+    conn = get_conn()
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    vals = list(fields.values()) + [paper_id]
+    cur = conn.execute(f"UPDATE papers SET {sets} WHERE id = ?", vals)
+    conn.commit()
     return cur.rowcount > 0
 
 
 def get_all_citations() -> list[dict]:
-    with get_conn() as conn:
-        rows = conn.execute("SELECT * FROM citations").fetchall()
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM citations").fetchall()
     return [dict(r) for r in rows]
 
 
 def stats() -> dict:
-    with get_conn() as conn:
-        total = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+    conn = get_conn()
+    total = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
 
-        by_status = {}
-        for r in conn.execute("SELECT status, COUNT(*) c FROM papers GROUP BY status").fetchall():
-            by_status[r["status"] or "unread"] = r["c"]
+    by_status = {}
+    for r in conn.execute("SELECT status, COUNT(*) c FROM papers GROUP BY status").fetchall():
+        by_status[r["status"] or "unread"] = r["c"]
 
-        by_pillar = {}
-        for r in conn.execute("SELECT pillar, COUNT(*) c FROM papers GROUP BY pillar").fetchall():
-            by_pillar[r["pillar"] or "unassigned"] = r["c"]
+    by_pillar = {}
+    for r in conn.execute("SELECT pillar, COUNT(*) c FROM papers GROUP BY pillar").fetchall():
+        by_pillar[r["pillar"] or "unassigned"] = r["c"]
 
-        by_chapter = {}
-        for r in conn.execute(
-            "SELECT chapter, COUNT(*) c FROM papers WHERE chapter IS NOT NULL GROUP BY chapter"
-        ).fetchall():
-            by_chapter[r["chapter"]] = r["c"]
+    by_chapter = {}
+    for r in conn.execute(
+        "SELECT chapter, COUNT(*) c FROM papers WHERE chapter IS NOT NULL GROUP BY chapter"
+    ).fetchall():
+        by_chapter[r["chapter"]] = r["c"]
 
-        recent = conn.execute(
-            "SELECT query, source, result_count, timestamp FROM search_history "
-            "ORDER BY timestamp DESC LIMIT 5"
-        ).fetchall()
+    recent = conn.execute(
+        "SELECT query, source, result_count, timestamp FROM search_history "
+        "ORDER BY timestamp DESC LIMIT 5"
+    ).fetchall()
 
     return {
         "total": total,
@@ -182,11 +239,11 @@ def stats() -> dict:
 
 def get_tags() -> list[str]:
     """Return all unique tags used in the library."""
-    with get_conn() as conn:
-        rows = conn.execute("SELECT tags FROM papers WHERE tags IS NOT NULL AND tags != '[]'").fetchall()
+    conn = get_conn()
+    rows = conn.execute("SELECT tags FROM papers WHERE tags IS NOT NULL AND tags != '[]'").fetchall()
     tags: set[str] = set()
     for row in rows:
-        for t in json.loads(row["tags"]):
+        for t in _safe_json_loads(row["tags"], []):
             tags.add(t)
     return sorted(tags)
 
@@ -196,41 +253,41 @@ def db_exists() -> bool:
 
 
 def get_watch_list() -> list[dict]:
-    with get_conn() as conn:
-        rows = conn.execute("SELECT * FROM watch_seeds ORDER BY added_at DESC").fetchall()
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM watch_seeds ORDER BY added_at DESC").fetchall()
     return [dict(r) for r in rows]
 
 
 def get_search_history(limit: int = 20) -> list[dict]:
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM search_history ORDER BY timestamp DESC LIMIT ?", (limit,)
-        ).fetchall()
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM search_history ORDER BY timestamp DESC LIMIT ?", (limit,)
+    ).fetchall()
     return [dict(r) for r in rows]
 
 
 def get_fulltext(paper_id: str) -> Optional[str]:
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT text FROM pdf_fulltext WHERE paper_id = ?", (paper_id,)
-        ).fetchone()
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT text FROM pdf_fulltext WHERE paper_id = ?", (paper_id,)
+    ).fetchone()
     return row["text"] if row else None
 
 
 def prisma_counts() -> dict:
     """Return counts needed for a PRISMA flow diagram."""
-    with get_conn() as conn:
-        identified = conn.execute(
-            "SELECT COALESCE(SUM(result_count), 0) FROM search_history"
-        ).fetchone()[0]
-        total = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
-        by_status = {}
-        for r in conn.execute("SELECT status, COUNT(*) c FROM papers GROUP BY status").fetchall():
-            by_status[r["status"] or "unread"] = r["c"]
-        screened_out = conn.execute(
-            "SELECT COUNT(*) FROM papers WHERE tags LIKE '%\"screened-out\"%'"
-        ).fetchone()[0]
-        included = by_status.get("read", 0) + by_status.get("deep_read", 0)
+    conn = get_conn()
+    identified = conn.execute(
+        "SELECT COALESCE(SUM(result_count), 0) FROM search_history"
+    ).fetchone()[0]
+    total = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+    by_status = {}
+    for r in conn.execute("SELECT status, COUNT(*) c FROM papers GROUP BY status").fetchall():
+        by_status[r["status"] or "unread"] = r["c"]
+    screened_out = conn.execute(
+        "SELECT COUNT(*) FROM papers WHERE tags LIKE '%\"screened-out\"%'"
+    ).fetchone()[0]
+    included = by_status.get("read", 0) + by_status.get("deep_read", 0)
     return {
         "identified": int(identified),
         "screened": total,
