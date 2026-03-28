@@ -2,8 +2,6 @@
   <img src="Logo.png" alt="Ariadne" width="280">
 </p>
 
-<h1 align="center">Ariadne</h1>
-
 <p align="center">
   <strong>A local, self-hosted literature review system for Claude Code.</strong><br>
   Search papers, build an annotated library, map citation networks, extract structured information, and export BibTeX — all from inside Claude without switching to Elicit, SciSpace, Connected Papers, or Zotero.
