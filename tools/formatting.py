@@ -81,6 +81,10 @@ async def resolve_paper_id(paper_id: str) -> tuple[Optional[str], Optional[str]]
         elif query_words and all(w in title_lower for w in query_words):
             title_matches.append(p)
 
+    # Auto-resolve if exactly one title match (even if partial ID was ambiguous)
+    if len(title_matches) == 1:
+        return title_matches[0].id, None
+
     # Build error message with suggestions
     lines = [f"Paper '{paper_id}' not found in library."]
 

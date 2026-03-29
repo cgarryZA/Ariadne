@@ -51,6 +51,7 @@ _TASK_TIERS: dict[str, str] = {
     "deduplicate_check":    "fast",
     "screen_abstract":      "fast",
     "extract_concepts":     "fast",
+    "extract_claims":       "fast",
     "citation_context":     "fast",
     # Reasoning tier — synthesis, comparison, quality assessment
     "assess_quality":       "reasoning",
@@ -58,6 +59,7 @@ _TASK_TIERS: dict[str, str] = {
     "generate_outline":     "reasoning",
     "synthesize":           "reasoning",
     "detect_contradictions": "reasoning",
+    "compare_claims_structured": "reasoning",
     "gap_analysis":         "reasoning",
     "notation_standardize": "reasoning",
     "red_team_proponent":   "reasoning",
@@ -118,11 +120,29 @@ _TASK_PROMPTS: dict[str, str] = {
         'Output JSON: {"concepts": [{"name": "...", "relation": "introduces|extends|applies|critiques|uses"}], '
         '"confidence_score": 0-100}'
     ),
+    "extract_claims": (
+        "Extract all falsifiable claims from this paper as structured objects. "
+        "For each claim, identify: the natural-language claim, the metric being measured "
+        "(if any), the reported value, the dataset or problem setting, key conditions/assumptions, "
+        "comparison direction (e.g. 'A > B'), and claim type (result/methodology/assumption/limitation). "
+        "Focus on quantitative and verifiable claims. Skip vague statements. "
+        'Output JSON: {"claims": [{"claim": "...", "metric": "...", "value": "...", '
+        '"dataset": "...", "conditions": "...", "direction": "...", '
+        '"claim_type": "result|methodology|assumption|limitation"}], "confidence_score": 0-100}'
+    ),
     "detect_contradictions": (
         "Compare the claims in these two papers. Identify any contradictions, "
         "disagreements, or tensions. Also note where they agree. "
         'Output JSON: {"contradictions": ["..."], "agreements": ["..."], "tension_level": "none|low|medium|high", '
         '"confidence_score": 0-100}'
+    ),
+    "compare_claims_structured": (
+        "You are given structured claims from two papers. Compare them and identify "
+        "contradictions where the SAME metric on the SAME dataset or problem under SIMILAR conditions "
+        "shows DIFFERENT results or directions. Also flag methodological disagreements. "
+        "Be precise — only flag genuine conflicts, not differences in scope. "
+        'Output JSON: {"conflicts": [{"claim_a": "...", "claim_b": "...", "type": "result_conflict|methodology_conflict|assumption_conflict", '
+        '"explanation": "...", "severity": "high|medium|low"}], "agreements": ["..."], "confidence_score": 0-100}'
     ),
     "citation_context": (
         "Find and classify how the cited paper is referenced. "

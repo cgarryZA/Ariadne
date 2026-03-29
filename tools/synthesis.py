@@ -18,18 +18,123 @@ from tools.formatting import validate_pillar, resolve_paper_id
 def register(mcp):
 
     @mcp.tool()
+    async def extract_structured_claims(paper_id: str) -> str:
+        """Extract structured, falsifiable claims from a paper.
+
+        Each claim is stored with: metric, value, dataset, conditions, direction,
+        and claim type. This enables algorithmic contradiction detection —
+        comparing specific numbers under specific conditions, not just vibes.
+
+        Requires ANTHROPIC_API_KEY for auto-extraction. Without it, formats
+        the paper for manual claim extraction.
+
+        Args:
+            paper_id: The paper's ID
+        """
+        paper = await db.get_paper(paper_id)
+        if not paper:
+            return f"Paper '{paper_id}' not found."
+
+        existing = await db.get_claims(paper_id)
+        if existing:
+            lines = [f"Paper already has {len(existing)} structured claims:"]
+            for c in existing:
+                parts = [f"  {c['claim']}"]
+                if c.get("metric"):
+                    parts.append(f"    metric={c['metric']}, value={c.get('value', '?')}")
+                if c.get("dataset"):
+                    parts.append(f"    dataset={c['dataset']}")
+                if c.get("conditions"):
+                    parts.append(f"    conditions={c['conditions']}")
+                lines.extend(parts)
+            lines.append(f"\nTo re-extract, delete existing claims first.")
+            return "\n".join(lines)
+
+        # Build text
+        text_parts = [f"Title: {paper.title}"]
+        if paper.abstract:
+            text_parts.append(f"Abstract: {paper.abstract}")
+        if paper.key_findings:
+            text_parts.append(f"Key findings: {'; '.join(paper.key_findings)}")
+        if paper.methodology:
+            text_parts.append(f"Methodology: {paper.methodology}")
+        if paper.convergence_bounds:
+            text_parts.append(f"Convergence: {paper.convergence_bounds}")
+        if paper.limitations:
+            text_parts.append(f"Limitations: {paper.limitations}")
+
+        fulltext = await db.get_fulltext(paper_id)
+        if fulltext:
+            processed, _ = budget_text(fulltext, "extract_key_findings")
+            text_parts.append(f"Text:\n{processed}")
+
+        paper_text = "\n\n".join(text_parts)
+
+        if llm_available():
+            try:
+                result = await extract(paper_text, "extract_claims")
+                claims = result.data.get("claims", [])
+                if claims:
+                    stored = await db.store_claims(paper_id, claims)
+                    lines = [
+                        f"Extracted {stored} structured claims from '{paper.title}':",
+                        "",
+                    ]
+                    for c in claims:
+                        parts = [f"  [{c.get('claim_type', 'result')}] {c['claim']}"]
+                        details = []
+                        if c.get("metric"):
+                            details.append(f"metric={c['metric']}")
+                        if c.get("value"):
+                            details.append(f"value={c['value']}")
+                        if c.get("dataset"):
+                            details.append(f"dataset={c['dataset']}")
+                        if c.get("direction"):
+                            details.append(f"direction={c['direction']}")
+                        if details:
+                            parts.append(f"    {', '.join(details)}")
+                        if c.get("conditions"):
+                            parts.append(f"    conditions: {c['conditions']}")
+                        lines.extend(parts)
+                    lines.append(f"\n[Model: {result.model_used}, confidence: {result.confidence_score}]")
+                    return "\n".join(lines)
+                return "No structured claims could be extracted. Paper may need more metadata."
+            except Exception as e:
+                pass  # fall through
+
+        # Manual mode
+        cite = (paper.authors[0].name.split()[-1] if paper.authors else "?") + str(paper.year or "")
+        lines = [
+            f"[MANUAL MODE] Extract structured claims from [{cite}] {paper.title}",
+            "",
+        ]
+        for part in text_parts[:5]:
+            lines.append(f"  {part[:200]}")
+        lines += [
+            "",
+            "-" * 60,
+            "For each claim, provide structured JSON then call store_claims():",
+            '  {"claim": "Method X achieves 0.87 accuracy", "metric": "accuracy",',
+            '   "value": "0.87", "dataset": "CIFAR-10", "conditions": "batch=128",',
+            '   "direction": "X > baseline", "claim_type": "result"}',
+        ]
+        return "\n".join(lines)
+
+    @mcp.tool()
     async def detect_contradictions(
         paper_ids: Optional[str] = None,
         pillar: Optional[str] = None,
         chapter: Optional[str] = None,
     ) -> str:
-        """Detect contradictions and methodological disagreements across papers.
+        """Detect contradictions across papers using structured claim comparison.
 
-        Compares extracted claims and findings across papers targeting the same
-        problem. Flags improvements, regressions, and conflicting conclusions.
+        Three-layer detection:
+        1. Algorithmic: match claims by (metric, dataset) and check conflicting values/directions
+        2. LLM-assisted: for claims that share a metric but differ in conditions, use LLM to assess
+        3. Manual: format remaining claims for human review
 
-        If ANTHROPIC_API_KEY is set, uses internal LLM for automated detection.
-        Otherwise formats papers for manual analysis.
+        Run extract_structured_claims() on papers first for best results.
+        Falls back to free-text comparison when no structured claims exist.
 
         Args:
             paper_ids: Comma-separated IDs (or use pillar/chapter to select a group)
@@ -50,20 +155,11 @@ def register(mcp):
             scope = f" in pillar '{pillar}'" if pillar else (f" in chapter '{chapter}'" if chapter else "")
             return f"Need at least 2 papers{scope} to detect contradictions. Found {len(papers)}."
 
-        # Build a summary of each paper's claims
-        paper_claims = []
-        for p in papers:
-            cite = (p.authors[0].name.split()[-1] if p.authors else "?") + str(p.year or "")
-            claims = []
-            if p.key_findings:
-                claims.extend(p.key_findings)
-            if p.methodology:
-                claims.append(f"Method: {p.methodology}")
-            if p.limitations:
-                claims.append(f"Limitations: {p.limitations}")
-            if p.convergence_bounds:
-                claims.append(f"Convergence: {p.convergence_bounds}")
-            paper_claims.append((cite, p.title, p.id, claims))
+        paper_ids_set = {p.id for p in papers}
+        paper_map = {p.id: p for p in papers}
+
+        def _cite(p):
+            return (p.authors[0].name.split()[-1] if p.authors else "?") + str(p.year or "")
 
         lines = [
             "CONTRADICTION & DISAGREEMENT ANALYSIS",
@@ -71,69 +167,162 @@ def register(mcp):
             "",
         ]
 
-        # If LLM is available, do pairwise contradiction detection on high-signal pairs
-        if llm_available() and any(claims for _, _, _, claims in paper_claims):
-            lines.append("[Using internal LLM for automated detection]")
+        # Collect all structured claims for these papers
+        all_claims = []
+        for p in papers:
+            claims = await db.get_claims(p.id)
+            for c in claims:
+                c["_cite"] = _cite(p)
+                c["_title"] = p.title
+            all_claims.extend(claims)
+
+        # === Layer 1: Algorithmic comparison on structured claims ===
+        algorithmic_conflicts = []
+        if len(all_claims) >= 2:
+            # Group claims by (metric, dataset) for direct comparison
+            claim_groups: dict[str, list] = {}
+            for c in all_claims:
+                if c.get("metric"):
+                    key = (c["metric"].lower().strip(), (c.get("dataset") or "").lower().strip())
+                    claim_groups.setdefault(key, []).append(c)
+
+            for (metric, dataset), group in claim_groups.items():
+                if len(group) < 2:
+                    continue
+                # Check for conflicting values/directions from different papers
+                by_paper: dict[str, list] = {}
+                for c in group:
+                    by_paper.setdefault(c["paper_id"], []).append(c)
+
+                if len(by_paper) < 2:
+                    continue
+
+                paper_list = list(by_paper.items())
+                for i, (pid_a, claims_a) in enumerate(paper_list):
+                    for pid_b, claims_b in paper_list[i + 1:]:
+                        for ca in claims_a:
+                            for cb in claims_b:
+                                # Check direction conflict
+                                dir_a = (ca.get("direction") or "").lower()
+                                dir_b = (cb.get("direction") or "").lower()
+                                val_a = ca.get("value")
+                                val_b = cb.get("value")
+
+                                is_conflict = False
+                                reason = ""
+
+                                if dir_a and dir_b and dir_a != dir_b:
+                                    is_conflict = True
+                                    reason = f"Opposite directions: '{dir_a}' vs '{dir_b}'"
+                                elif val_a and val_b and val_a != val_b:
+                                    # Different values — could be conflict or just different conditions
+                                    is_conflict = True
+                                    reason = f"Different values: {val_a} vs {val_b}"
+
+                                if is_conflict:
+                                    ds = f" on {dataset}" if dataset else ""
+                                    algorithmic_conflicts.append(
+                                        f"  [{ca['_cite']}] vs [{cb['_cite']}] — {metric}{ds}\n"
+                                        f"    {ca['_cite']}: {ca['claim']}\n"
+                                        f"    {cb['_cite']}: {cb['claim']}\n"
+                                        f"    Conflict: {reason}"
+                                    )
+
+        if algorithmic_conflicts:
+            lines.append(f"=== STRUCTURAL CONFLICTS ({len(algorithmic_conflicts)}) ===")
+            lines.append("(Detected algorithmically from structured claims)")
+            lines.append("")
+            lines.extend(algorithmic_conflicts)
             lines.append("")
 
-            contradictions_found = []
-            # Compare papers pairwise (limit to avoid explosion)
-            pairs = []
-            for i, (cite_a, title_a, id_a, claims_a) in enumerate(paper_claims):
-                for cite_b, title_b, id_b, claims_b in paper_claims[i + 1:]:
-                    if claims_a and claims_b:
-                        pairs.append((cite_a, title_a, claims_a, cite_b, title_b, claims_b))
+        # === Layer 2: LLM comparison for ambiguous cases ===
+        llm_conflicts = []
+        if llm_available() and len(all_claims) >= 4:
+            # Find claim pairs that share a metric but we couldn't compare algorithmically
+            import json as _json
+            ungrouped_pairs = []
+            by_metric: dict[str, list] = {}
+            for c in all_claims:
+                if c.get("metric"):
+                    by_metric.setdefault(c["metric"].lower().strip(), []).append(c)
 
-            for cite_a, title_a, claims_a, cite_b, title_b, claims_b in pairs[:15]:
+            for metric, group in by_metric.items():
+                by_paper = {}
+                for c in group:
+                    by_paper.setdefault(c["paper_id"], []).append(c)
+                if len(by_paper) >= 2:
+                    pids = list(by_paper.keys())
+                    for i in range(len(pids)):
+                        for j in range(i + 1, len(pids)):
+                            # Only send to LLM if not already caught algorithmically
+                            ungrouped_pairs.append((pids[i], by_paper[pids[i]], pids[j], by_paper[pids[j]]))
+
+            for pid_a, claims_a, pid_b, claims_b in ungrouped_pairs[:10]:
+                pa = paper_map.get(pid_a)
+                pb = paper_map.get(pid_b)
+                if not pa or not pb:
+                    continue
                 text = (
-                    f"Paper A [{cite_a}]: {title_a}\n"
-                    f"Claims: {'; '.join(claims_a)}\n\n"
-                    f"Paper B [{cite_b}]: {title_b}\n"
-                    f"Claims: {'; '.join(claims_b)}"
+                    f"Paper A [{_cite(pa)}]: {pa.title}\n"
+                    f"Claims: {_json.dumps([{k: c[k] for k in ('claim','metric','value','dataset','conditions','direction') if c.get(k)} for c in claims_a])}\n\n"
+                    f"Paper B [{_cite(pb)}]: {pb.title}\n"
+                    f"Claims: {_json.dumps([{k: c[k] for k in ('claim','metric','value','dataset','conditions','direction') if c.get(k)} for c in claims_b])}"
                 )
                 try:
-                    result = await extract(text, "detect_contradictions")
-                    tension = result.data.get("tension_level", "none")
-                    contras = result.data.get("contradictions", [])
-                    if tension != "none" and contras:
-                        contradictions_found.append(
-                            f"**[{cite_a}] vs [{cite_b}]** — tension: {tension}\n"
-                            + "\n".join(f"  - {c}" for c in contras)
-                        )
+                    result = await extract(text, "compare_claims_structured")
+                    conflicts = result.data.get("conflicts", [])
+                    for conf in conflicts:
+                        if conf.get("severity") in ("high", "medium"):
+                            llm_conflicts.append(
+                                f"  [{_cite(pa)}] vs [{_cite(pb)}] — {conf.get('type', '?')}\n"
+                                f"    {conf.get('explanation', '')}"
+                            )
                 except Exception:
-                    pass  # graceful degradation
+                    pass
 
-            if contradictions_found:
-                lines.append(f"Found {len(contradictions_found)} contradictions/tensions:\n")
-                lines.extend(contradictions_found)
-            else:
-                lines.append("No significant contradictions detected in extracted claims.")
-                lines.append("Note: quality depends on having key_findings and methodology extracted.")
+        if llm_conflicts:
+            lines.append(f"=== LLM-DETECTED CONFLICTS ({len(llm_conflicts)}) ===")
+            lines.append("(Ambiguous cases assessed by reasoning model)")
+            lines.append("")
+            lines.extend(llm_conflicts)
+            lines.append("")
 
-            return "\n".join(lines)
+        # === Layer 3: Summary + manual fallback ===
+        total = len(algorithmic_conflicts) + len(llm_conflicts)
+        if total > 0:
+            lines.append(f"Total: {total} conflicts detected ({len(algorithmic_conflicts)} structural, {len(llm_conflicts)} LLM-assessed)")
+        elif all_claims:
+            lines.append("No contradictions detected in structured claims.")
+            lines.append(f"({len(all_claims)} claims compared across {len(papers)} papers)")
+        else:
+            # No structured claims — fall back to free-text comparison
+            lines.append("No structured claims found. Run extract_structured_claims() first for best results.")
+            lines.append("")
 
-        # Fallback: format for manual analysis by Claude
-        lines.append("Paper claims summary (for manual contradiction analysis):")
-        lines.append("-" * 60)
+            # Still provide what we can from free-text fields
+            lines.append("[MANUAL MODE — free-text claims for comparison]")
+            lines.append("-" * 60)
+            for p in papers:
+                cite = _cite(p)
+                lines.append(f"\n[{cite}] {p.title}")
+                if p.key_findings:
+                    for f in p.key_findings:
+                        lines.append(f"  - {f}")
+                if p.methodology:
+                    lines.append(f"  Method: {p.methodology}")
+                if p.convergence_bounds:
+                    lines.append(f"  Convergence: {p.convergence_bounds}")
+                if not p.key_findings and not p.methodology:
+                    lines.append("  [no data — run extract_key_findings first]")
 
-        for cite, title, pid, claims in paper_claims:
-            lines.append(f"\n[{cite}] {title}")
-            lines.append(f"  ID: {pid}")
-            if claims:
-                for c in claims:
-                    lines.append(f"  - {c}")
-            else:
-                lines.append("  [no claims extracted — run extract_key_findings first]")
-
-        lines += [
-            "",
-            "-" * 60,
-            "TASK: Compare claims across papers and identify:",
-            "  1. Direct contradictions (Paper A says X works; Paper B says X fails)",
-            "  2. Methodological disagreements (different approaches to same problem)",
-            "  3. Conflicting quantitative results (different performance numbers)",
-            "  4. Implicit tensions (unstated disagreements in assumptions)",
-        ]
+            lines += [
+                "",
+                "-" * 60,
+                "TASK: Compare claims and identify:",
+                "  1. Direct result contradictions (same metric, different values)",
+                "  2. Methodological disagreements (different approaches to same problem)",
+                "  3. Assumption conflicts (incompatible preconditions)",
+            ]
 
         return "\n".join(lines)
 

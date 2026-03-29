@@ -130,10 +130,32 @@ class ExtractedQuality(BaseModel):
     confidence_score: int = Field(ge=0, le=100, default=100)
 
 
+class StructuredClaim(BaseModel):
+    """A single falsifiable claim extracted from a paper.
+
+    Structured for algorithmic comparison — two claims can be compared
+    by matching on (metric, dataset, conditions) and checking direction/value.
+    """
+    claim: str = Field(description="Natural language claim statement")
+    metric: Optional[str] = Field(None, description="What is measured (e.g. accuracy, convergence rate, L2 error)")
+    value: Optional[str] = Field(None, description="Reported value (e.g. '0.87', '1/sqrt(N)', 'O(h^2)')")
+    dataset: Optional[str] = Field(None, description="Dataset or problem setting (e.g. 'CIFAR-10', '100-dim Black-Scholes')")
+    conditions: Optional[str] = Field(None, description="Key conditions/assumptions (e.g. 'batch_size=128', 'Lipschitz driver')")
+    direction: Optional[str] = Field(None, description="Comparison direction if applicable (e.g. 'A > B', 'improves', 'fails')")
+    claim_type: str = Field(default="result", description="One of: result, methodology, assumption, limitation")
+
+
+class ExtractedClaims(BaseModel):
+    """Validated structured claims extraction from a paper."""
+    claims: list[StructuredClaim] = Field(default_factory=list)
+    confidence_score: int = Field(ge=0, le=100, default=100)
+
+
 # Map task names to their validation schemas
 EXTRACTION_SCHEMAS: dict[str, type[BaseModel]] = {
     "extract_findings": ExtractedFindings,
     "assess_quality": ExtractedQuality,
+    "extract_claims": ExtractedClaims,
 }
 
 

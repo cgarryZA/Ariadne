@@ -86,6 +86,30 @@ CREATE TABLE IF NOT EXISTS config (
     value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_type TEXT NOT NULL,
+    research_question TEXT,
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP,
+    status TEXT DEFAULT 'running',
+    steps_json TEXT DEFAULT '[]',
+    summary_json TEXT DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS structured_claims (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    paper_id TEXT NOT NULL,
+    claim TEXT NOT NULL,
+    metric TEXT,
+    value TEXT,
+    dataset TEXT,
+    conditions TEXT,
+    direction TEXT,
+    claim_type TEXT DEFAULT 'result',
+    UNIQUE(paper_id, claim)
+);
+
 CREATE TABLE IF NOT EXISTS extraction_cache (
     cache_key TEXT PRIMARY KEY,
     task TEXT NOT NULL,
@@ -742,4 +766,116 @@ async def list_concepts(limit: int = 100) -> list[dict]:
            LIMIT ?""",
         (limit,),
     )
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# Structured claims
+# ---------------------------------------------------------------------------
+
+async def create_pipeline_run(run_type: str, research_question: Optional[str] = None) -> int:
+    conn = await get_db()
+    cursor = await conn.execute(
+        "INSERT INTO pipeline_runs (run_type, research_question) VALUES (?, ?)",
+        (run_type, research_question),
+    )
+    await conn.commit()
+    return cursor.lastrowid
+
+
+async def log_pipeline_step(run_id: int, step_name: str, result: dict) -> None:
+    conn = await get_db()
+    cursor = await conn.execute(
+        "SELECT steps_json FROM pipeline_runs WHERE id = ?", (run_id,)
+    )
+    row = await cursor.fetchone()
+    if not row:
+        return
+    steps = json.loads(row["steps_json"] or "[]")
+    steps.append({"step": step_name, "timestamp": datetime.now().isoformat(), **result})
+    await conn.execute(
+        "UPDATE pipeline_runs SET steps_json = ? WHERE id = ?",
+        (json.dumps(steps), run_id),
+    )
+    await conn.commit()
+
+
+async def complete_pipeline_run(run_id: int, summary: dict) -> None:
+    conn = await get_db()
+    await conn.execute(
+        "UPDATE pipeline_runs SET status = 'completed', completed_at = ?, summary_json = ? WHERE id = ?",
+        (datetime.now().isoformat(), json.dumps(summary), run_id),
+    )
+    await conn.commit()
+
+
+async def get_pipeline_run(run_id: int) -> Optional[dict]:
+    conn = await get_db()
+    cursor = await conn.execute("SELECT * FROM pipeline_runs WHERE id = ?", (run_id,))
+    row = await cursor.fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["steps"] = json.loads(d.pop("steps_json", "[]"))
+    d["summary"] = json.loads(d.pop("summary_json", "{}"))
+    return d
+
+
+async def list_pipeline_runs(limit: int = 10) -> list[dict]:
+    conn = await get_db()
+    cursor = await conn.execute(
+        "SELECT id, run_type, research_question, started_at, completed_at, status FROM pipeline_runs ORDER BY id DESC LIMIT ?",
+        (limit,),
+    )
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+async def store_claims(paper_id: str, claims: list[dict]) -> int:
+    """Store structured claims for a paper. Returns count stored."""
+    conn = await get_db()
+    stored = 0
+    for c in claims:
+        try:
+            await conn.execute(
+                """INSERT OR IGNORE INTO structured_claims
+                   (paper_id, claim, metric, value, dataset, conditions, direction, claim_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (paper_id, c.get("claim", ""), c.get("metric"), c.get("value"),
+                 c.get("dataset"), c.get("conditions"), c.get("direction"),
+                 c.get("claim_type", "result")),
+            )
+            stored += 1
+        except Exception:
+            pass
+    await conn.commit()
+    return stored
+
+
+async def get_claims(paper_id: str) -> list[dict]:
+    conn = await get_db()
+    cursor = await conn.execute(
+        "SELECT * FROM structured_claims WHERE paper_id = ?", (paper_id,)
+    )
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+async def get_all_claims(pillar: Optional[str] = None) -> list[dict]:
+    """Get all structured claims, optionally filtered by pillar."""
+    conn = await get_db()
+    if pillar:
+        cursor = await conn.execute(
+            """SELECT sc.*, p.title, p.year, p.pillar
+               FROM structured_claims sc
+               JOIN papers p ON sc.paper_id = p.id
+               WHERE p.pillar = ?
+               ORDER BY sc.metric, sc.dataset""",
+            (pillar,),
+        )
+    else:
+        cursor = await conn.execute(
+            """SELECT sc.*, p.title, p.year, p.pillar
+               FROM structured_claims sc
+               JOIN papers p ON sc.paper_id = p.id
+               ORDER BY sc.metric, sc.dataset"""
+        )
     return [dict(r) for r in await cursor.fetchall()]

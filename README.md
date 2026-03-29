@@ -11,7 +11,7 @@
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python 3.11+"></a>
   <a href="https://pypi.org/project/fastmcp/"><img src="https://img.shields.io/badge/MCP-FastMCP-purple.svg" alt="FastMCP"></a>
-  <img src="https://img.shields.io/badge/tools-83-green.svg" alt="83 MCP Tools">
+  <img src="https://img.shields.io/badge/tools-89-green.svg" alt="89 MCP Tools">
   <img src="https://img.shields.io/badge/APIs-S2%20%7C%20OpenAlex%20%7C%20arXiv%20%7C%20GitHub-orange.svg" alt="APIs">
   <img src="https://img.shields.io/badge/storage-SQLite%20%2B%20FTS5%20%2B%20ChromaDB-lightgrey.svg" alt="SQLite + FTS5 + ChromaDB">
 </p>
@@ -24,7 +24,7 @@
 
 Ariadne is an open-source MCP server that turns Claude into a full academic research system. It executes every stage of a systematic literature review — multi-source discovery, PRISMA screening, structured extraction, concept graph construction, adversarial quality assessment, Oxford three-move classification, contradiction detection, and final review assembly with LaTeX export — with local persistence, semantic search, and methodological rigor.
 
-83 tools. 10 database tables. 5 API integrations. Everything local. Everything persists across sessions.
+89 tools. 12 database tables. 5 API integrations. 20 integration tests. Everything local. Everything persists across sessions.
 
 ---
 
@@ -37,7 +37,7 @@ Ariadne is an open-source MCP server that turns Claude into a full academic rese
                      /      |      \
               Planner   Executor   Synthesizer
                            |
-                   MCP Tool Layer (83 tools)
+                   MCP Tool Layer (89 tools)
                   /    |     |      \       \
           Semantic  OpenAlex arXiv  GitHub  Internal LLM
           Scholar    API    API    API    (Haiku/Sonnet)
@@ -95,18 +95,29 @@ Everything persists locally in SQLite + ChromaDB across sessions.
 
 ## The Pipeline
 
+Three tiers of deterministic, logged review pipelines:
+
+| Pipeline | Papers | Depth | Time |
+|----------|--------|-------|------|
+| `quick-review` | 15-30 | Key papers, overview | ~30 min |
+| `standard-review` | 30-80 | Structured extraction, contradiction analysis | ~2 hrs |
+| `deep-review` | 80-150+ | Full extraction, concept graph, red-teaming, code verification | ~4+ hrs |
+
+Each pipeline follows a fixed tool sequence with logging. Every step is recorded in `pipeline_runs` — use `explain_pipeline_run()` to see exactly what happened.
+
 ```
  1. DEFINE      setup_review() + generate_search_strategy()
  2. DISCOVER    multi_search() + batch_add() + build_citation_network()
  3. SCREEN      screen_papers() + deduplicate_library() -> generate_prisma_report()
- 4. ANALYSE     summarize_paper() + extract_key_findings() + red_team_assess()
- 5. ORGANISE    classify_moves() + extract_concepts() + build_theorem_graph()
- 6. SYNTHESIZE  detect_contradictions() + auto_synthesize() + generate_future_research_gaps()
- 7. VERIFY      github_reality_check() + extract_citation_context()
- 8. SEARCH      semantic_search() + passage_search()
- 9. STRUCTURE   generate_review_outline(style) + assign_chapter()
-10. WRITE       assemble_review() + draft_section()
-11. EXPORT      export_bibtex() + compile_to_latex()
+ 4. EXTRACT     extract_structured_claims() + bulk_extract()
+ 5. ANALYSE     summarize_paper() + extract_key_findings() + red_team_assess()
+ 6. ORGANISE    classify_moves() + extract_concepts() + build_theorem_graph()
+ 7. SYNTHESIZE  detect_contradictions() + auto_synthesize() + generate_future_research_gaps()
+ 8. VERIFY      github_reality_check() + extract_citation_context()
+ 9. SEARCH      semantic_search() + passage_search()
+10. STRUCTURE   generate_review_outline(style) + assign_chapter()
+11. WRITE       assemble_review() + draft_section()
+12. EXPORT      export_bibtex() + compile_to_latex()
 ```
 
 ---
@@ -212,7 +223,7 @@ Deduplication uses four layers: DOI matching, normalized title matching, Jaccard
 
 ### Knowledge Representation
 
-SQLite with 10 tables:
+SQLite with 12 tables:
 
 | Table | Purpose |
 |-------|---------|
@@ -221,6 +232,8 @@ SQLite with 10 tables:
 | `concepts` | Academic concepts, methods, theories, theorems, lemmas |
 | `concept_paper_links` | Concept-paper relationships (introduces, extends, applies, critiques, uses) |
 | `concept_edges` | Concept-to-concept relationships (extends, replaces, contradicts, requires) |
+| `structured_claims` | Falsifiable claims with metric/value/dataset for algorithmic comparison |
+| `pipeline_runs` | Pipeline execution logs — every step, timing, results |
 | `extraction_cache` | Local LLM result cache — $0 on repeat queries |
 | `search_history` | Query audit trail for PRISMA reporting |
 | `watch_seeds` | Citation monitoring watch list |
@@ -278,7 +291,7 @@ Without the API key, everything works exactly as before — tools return formatt
 
 ---
 
-## MCP Tools Reference (83 tools)
+## MCP Tools Reference (89 tools)
 
 ### Setup & Configuration (4)
 | Tool | Description |
@@ -330,7 +343,8 @@ Without the API key, everything works exactly as before — tools return formatt
 | `identify_gaps()` | Coverage and gap analysis |
 | `evidence_consensus()` | Evidence synthesis on yes/no questions |
 | `generate_synthesis_matrix()` | Cross-paper comparison table |
-| `detect_contradictions()` | Find conflicting claims (LLM pairwise or manual) |
+| `extract_structured_claims()` | Extract falsifiable claims with metric/value/dataset/conditions |
+| `detect_contradictions()` | Three-layer: algorithmic claim comparison -> LLM assessment -> manual |
 | `auto_synthesize()` | Detect methodological camps, evolution, regressions |
 | `refine_research_question()` | Analyze coverage and suggest refinements |
 | `suggest_new_queries()` | Fill gaps with targeted searches |
@@ -389,6 +403,15 @@ Without the API key, everything works exactly as before — tools return formatt
 | `export_bibtex()` | Export as `.bib` with disambiguated cite keys |
 | `import_from_bibtex()` | Bulk-import from `.bib` with S2 enrichment |
 
+### Pipeline & Logging (5)
+| Tool | Description |
+|------|-------------|
+| `log_pipeline_start()` | Start a logged pipeline run |
+| `log_pipeline_step()` | Record a step with results |
+| `log_pipeline_complete()` | Mark run complete with summary |
+| `explain_pipeline_run()` | Show every step, what was filtered, where uncertainty is highest |
+| `list_pipeline_runs()` | List all pipeline runs with status |
+
 ### Monitoring & Citation Analysis (4)
 | Tool | Description |
 |------|-------------|
@@ -409,7 +432,7 @@ Without the API key, everything works exactly as before — tools return formatt
 | Oxford three-move model | Native | None | None | None | None |
 | Concept graph | Bidirectional | None | Citation only | None | None |
 | Theorem dependency DAG | From LaTeX | None | None | None | None |
-| Contradiction detection | Automated pairwise | None | None | None | None |
+| Contradiction detection | Structured claims + algorithmic + LLM | None | None | None | None |
 | Red-team quality assessment | Adversarial multi-agent | None | None | None | None |
 | Citation context classification | Supporting/contrasting/mentioning | None | None | Native | None |
 | Code-to-paper alignment | GitHub scraping | None | None | None | None |
@@ -490,10 +513,55 @@ Four pages: **Dashboard** (stats, pipeline, priority queue), **Papers** (filtera
 
 ---
 
+## Testing
+
+```bash
+pip install pytest pytest-asyncio
+pytest tests/test_integration.py -v
+```
+
+20 integration tests verify key invariants with synthetic papers (no API calls):
+- Deduplication detects exact title duplicates
+- Extraction fields are populated correctly
+- Pillar validation rejects unknown names with suggestions
+- Paper ID resolution handles prefixes, title words, and author names
+- Structured claims round-trip through the database
+- Contradictory claims are algorithmically detectable
+- Pipeline logging lifecycle works end-to-end
+- Noise stripping removes references
+- Token budgets are enforced
+- All 89 tools register without errors
+
+---
+
+## Current Reliability
+
+Ariadne is a structured reasoning environment for research, not a replacement for expert judgment. It accelerates review structure, discovery, and comparison — the human validates.
+
+**What works well:**
+- Multi-source discovery and deduplication is deterministic and reliable
+- Citation network building produces ground-truth edges from APIs
+- PRISMA audit trails are structurally correct by construction
+- BibTeX/LaTeX export is mechanically sound
+
+**What requires human validation:**
+- Summaries and key findings are LLM-generated and may contain errors or omissions
+- Quality assessments (including red-team) reflect LLM judgment, not ground truth
+- Contradiction detection compares structured claims but may hallucinate disagreements or miss subtle differences in mathematical assumptions
+- Concept extraction is approximate — concepts may be too broad, too narrow, or misclassified
+
+**What is still early:**
+- Mathematical content is extracted but not formally verified — notation standardization is heuristic, not symbolic
+- Theorem dependency parsing relies on regex patterns and works best with LaTeX-extracted text
+- GitHub code-to-paper alignment catches common ML tricks but won't find domain-specific implementation gaps
+
+**Best practice:** Use Ariadne to build the scaffold (find papers, map connections, structure the review), then apply your domain expertise to validate every claim, especially anything quantitative or mathematical.
+
+---
+
 ## Limitations
 
 - **API dependence** — Search quality depends on Semantic Scholar, OpenAlex, and arXiv indexing. Papers not in these databases won't be found.
-- **LLM outputs require validation** — Summaries, quality assessments, concept extraction, and contradiction detection are LLM-generated. Human review remains essential, especially for mathematical content.
 - **PDF extraction varies** — pdfplumber struggles with equations and complex layouts. Nougat produces excellent LaTeX but requires GPU and is slow. Mathpix is fast but requires a paid API key.
 - **SQLite scaling** — Sufficient for individual reviews (hundreds to low thousands of papers). Not designed for institutional-scale deployment.
 - **ChromaDB is optional** — Without it, semantic search re-embeds the library on each query. With it, queries are instant but storage grows.
