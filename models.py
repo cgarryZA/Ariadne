@@ -70,6 +70,73 @@ class Paper(BaseModel):
     themes: list[str] = Field(default_factory=list)
 
 
+class ExtractionResult(BaseModel):
+    """Structured result from an internal LLM extraction call (Phase 0).
+
+    Returned by tools/_llm_client.py:extract().  Carries the parsed data,
+    confidence score (for cascade routing), model provenance, and token usage.
+    """
+    data: dict = Field(default_factory=dict)
+    confidence_score: int = 100   # 0-100; <75 triggers cascade to stronger model
+    model_used: str = ""
+    cached: bool = False
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+class ProcessedText(BaseModel):
+    """Fulltext after noise stripping and token-budget capping.
+
+    Returned by tools/_text_processing.py:budget_text() and stored
+    alongside tool outputs so callers can see what was trimmed.
+    """
+    content: str
+    original_tokens: int
+    processed_tokens: int
+    sections_stripped: bool = False
+    truncated: bool = False
+    savings_pct: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Strict extraction schemas (Phase 2.4)
+# Tools using the internal LLM validate responses against these schemas.
+# ---------------------------------------------------------------------------
+
+class ExtractedMethodology(BaseModel):
+    """Structured methodology extraction."""
+    approach: str = Field(description="Core methodological approach")
+    assumptions: list[str] = Field(default_factory=list, description="Key assumptions made")
+    failure_modes: list[str] = Field(default_factory=list, description="Known failure modes")
+
+
+class ExtractedMath(BaseModel):
+    """Structured math framework extraction."""
+    equations: list[str] = Field(default_factory=list, description="Key equations in LaTeX")
+    theorems: list[str] = Field(default_factory=list, description="Theorem statements")
+    convergence: Optional[str] = Field(None, description="Convergence rate/bound if stated")
+
+
+class ExtractedFindings(BaseModel):
+    """Validated key findings extraction."""
+    findings: list[str] = Field(min_length=1, max_length=10, description="Key findings")
+    confidence_score: int = Field(ge=0, le=100, default=100)
+
+
+class ExtractedQuality(BaseModel):
+    """Validated quality assessment."""
+    score: int = Field(ge=1, le=5, description="Quality score 1-5")
+    notes: str = Field(description="Brief justification")
+    confidence_score: int = Field(ge=0, le=100, default=100)
+
+
+# Map task names to their validation schemas
+EXTRACTION_SCHEMAS: dict[str, type[BaseModel]] = {
+    "extract_findings": ExtractedFindings,
+    "assess_quality": ExtractedQuality,
+}
+
+
 class Citation(BaseModel):
     citing_id: str
     cited_id: str

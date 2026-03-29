@@ -164,6 +164,76 @@ async def search_papers(
     return [_parse_work(item, library_ids, library_dois) for item in data.get("results", [])]
 
 
+async def get_author_details(author_id: str) -> dict:
+    """Fetch author profile by OpenAlex author ID."""
+    params = {
+        **_base_params(),
+        "select": "id,display_name,works_count,cited_by_count,last_known_institutions,works_api_url",
+    }
+    resp = await _request_with_retry("GET", f"{BASE_URL}/authors/{author_id}", params=params)
+    return resp.json()
+
+
+async def search_authors(query: str, limit: int = 5) -> list[dict]:
+    """Search for authors by name."""
+    params = {
+        **_base_params(),
+        "search": query,
+        "per-page": min(limit, 25),
+        "select": "id,display_name,works_count,cited_by_count,last_known_institutions",
+    }
+    resp = await _request_with_retry("GET", f"{BASE_URL}/authors", params=params)
+    data = resp.json()
+    return data.get("results", [])
+
+
+async def get_author_works(
+    author_id: str,
+    limit: int = 20,
+    year_from: Optional[int] = None,
+) -> list[dict]:
+    """Fetch recent works by an author."""
+    params: dict = {
+        **_base_params(),
+        "filter": f"authorships.author.id:{author_id}",
+        "per-page": min(limit, 200),
+        "select": WORK_FIELDS,
+        "sort": "publication_year:desc",
+    }
+    if year_from:
+        params["filter"] += f",publication_year:>{year_from - 1}"
+    resp = await _request_with_retry("GET", f"{BASE_URL}/works", params=params)
+    data = resp.json()
+    return data.get("results", [])
+
+
+async def get_coauthors(author_id: str, limit: int = 20) -> list[dict]:
+    """Find frequent co-authors of a given author via OpenAlex."""
+    # Get the author's recent works
+    works = await get_author_works(author_id, limit=50)
+
+    coauthor_counts: dict[str, dict] = {}
+    for work in works:
+        for authorship in work.get("authorships", []):
+            coauthor = authorship.get("author", {})
+            cid = coauthor.get("id", "")
+            if cid and cid != author_id:
+                if cid not in coauthor_counts:
+                    institutions = authorship.get("institutions", [])
+                    inst_name = institutions[0].get("display_name", "") if institutions else ""
+                    coauthor_counts[cid] = {
+                        "id": cid,
+                        "name": coauthor.get("display_name", ""),
+                        "institution": inst_name,
+                        "count": 0,
+                    }
+                coauthor_counts[cid]["count"] += 1
+
+    # Sort by co-authorship frequency
+    result = sorted(coauthor_counts.values(), key=lambda x: -x["count"])
+    return result[:limit]
+
+
 async def get_paper_by_doi(doi: str) -> dict:
     """Fetch a single paper by DOI and return fields compatible with Paper model."""
     encoded_doi = f"doi:{doi}"

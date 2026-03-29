@@ -1,13 +1,15 @@
-"""Watch list / citation monitoring tools."""
+"""Watch list, citation monitoring, and citation context tools."""
 
 from __future__ import annotations
 
 import asyncio
+from typing import Optional
 
 import db
 from apis import semantic_scholar as s2
 from models import Citation
-from tools.formatting import format_result
+from tools._llm_client import extract, is_available as llm_available
+from tools._text_processing import budget_text
 
 
 def register(mcp):
@@ -188,3 +190,112 @@ def register(mcp):
             result += f"New papers added to library: {new_papers}\n"
         result += "\nRun find_bridges() to identify cross-pillar connections."
         return result
+
+    @mcp.tool()
+    async def extract_citation_context(
+        citing_paper_id: str,
+        cited_paper_id: str,
+    ) -> str:
+        """Analyze HOW one paper cites another — supporting, contrasting, or just mentioning.
+
+        Searches the citing paper's full text for references to the cited paper and
+        classifies each mention. Requires the citing paper to have full text stored
+        (run download_pdf first).
+
+        If ANTHROPIC_API_KEY is set, uses internal LLM for automated classification.
+
+        Args:
+            citing_paper_id: ID of the paper that does the citing
+            cited_paper_id: ID of the paper being cited
+        """
+        citing = await db.get_paper(citing_paper_id)
+        cited = await db.get_paper(cited_paper_id)
+
+        if not citing:
+            return f"Citing paper '{citing_paper_id}' not found in library."
+        if not cited:
+            return f"Cited paper '{cited_paper_id}' not found in library."
+
+        fulltext = await db.get_fulltext(citing_paper_id)
+        if not fulltext:
+            return (
+                f"No full text stored for '{citing.title}'.\n"
+                "Run download_pdf() first to download and extract the text."
+            )
+
+        # Find references to the cited paper in the text
+        # Look for author last names + year
+        search_terms = []
+        if cited.authors:
+            for a in cited.authors[:3]:
+                last = a.name.split()[-1]
+                if cited.year:
+                    search_terms.append(f"{last}")
+        if cited.year:
+            search_terms.append(str(cited.year))
+
+        # Extract paragraphs that mention the cited paper
+        paragraphs = fulltext.split("\n\n")
+        relevant = []
+        for para in paragraphs:
+            para_lower = para.lower()
+            # Check if this paragraph mentions the cited paper
+            if any(term.lower() in para_lower for term in search_terms if len(term) > 3):
+                # Further check: must mention year AND an author name
+                has_year = str(cited.year) in para if cited.year else True
+                has_author = any(
+                    a.name.split()[-1].lower() in para_lower
+                    for a in (cited.authors or [])[:3]
+                )
+                if has_year and has_author:
+                    relevant.append(para.strip()[:500])
+
+        if not relevant:
+            return (
+                f"Could not find references to '{cited.title}' in the text of '{citing.title}'.\n"
+                "The citation may use a different naming format or may not be in the extracted text."
+            )
+
+        lines = [
+            "CITATION CONTEXT ANALYSIS",
+            f"Citing: {citing.title} ({citing.year or '?'})",
+            f"Cited:  {cited.title} ({cited.year or '?'})",
+            f"Found {len(relevant)} mention(s)",
+            "",
+        ]
+
+        if llm_available():
+            text = (
+                f"Cited paper: {cited.title}\n\n"
+                "Passages from the citing paper that reference it:\n\n"
+                + "\n---\n".join(relevant[:5])
+            )
+            try:
+                result = await extract(text, "citation_context")
+                mentions = result.data.get("mentions", [])
+                if mentions:
+                    lines.append("Classification:")
+                    for m in mentions:
+                        ctx = m.get("context", "")[:150]
+                        ctype = m.get("type", "mentioning")
+                        lines.append(f"  [{ctype.upper()}] {ctx}")
+                    lines.append(f"\n[Model: {result.model_used}]")
+                    return "\n".join(lines)
+            except Exception:
+                pass  # Fall through to manual
+
+        # Manual mode
+        lines.append("Relevant passages:")
+        for i, para in enumerate(relevant[:5], 1):
+            lines.append(f"\n[{i}] {para}")
+
+        lines += [
+            "",
+            "-" * 60,
+            "Classify each passage as:",
+            "  SUPPORTING   — builds on, agrees with, extends the cited work",
+            "  CONTRASTING  — disagrees, finds problems, offers alternative",
+            "  MENTIONING   — neutral reference, background citation",
+        ]
+
+        return "\n".join(lines)

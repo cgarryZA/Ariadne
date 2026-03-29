@@ -6,6 +6,7 @@ from typing import Optional
 
 import db
 from models import Move
+from tools.formatting import validate_pillar
 
 
 def register(mcp):
@@ -28,10 +29,15 @@ def register(mcp):
             pillar: Limit to a research pillar
             chapter: Limit to a chapter/section
         """
+        pillar_err = await validate_pillar(pillar)
+        if pillar_err:
+            return pillar_err
+
         papers = await db.list_papers(pillar=pillar, chapter=chapter, sort_by="year", limit=200)
 
         if not papers:
-            return "No papers found. Add papers first."
+            scope = f" in pillar '{pillar}'" if pillar else (f" in chapter '{chapter}'" if chapter else "")
+            return f"No papers found{scope}. Add papers first."
 
         lines = [
             "OXFORD THREE-MOVE CLASSIFICATION",

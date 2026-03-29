@@ -6,7 +6,8 @@ import re
 from typing import Optional
 
 import db
-from tools.formatting import format_paper
+from tools.formatting import format_paper, validate_pillar
+from tools._embeddings import is_available as embeddings_available
 
 
 def _jaccard_similarity(a: str, b: str) -> float:
@@ -107,6 +108,9 @@ def register(mcp):
             chapter: Extract all papers in this chapter
             fields: Comma-separated fields to extract (default: configured extraction fields)
         """
+        pillar_err = await validate_pillar(pillar)
+        if pillar_err:
+            return pillar_err
         if paper_ids:
             ids = [pid.strip() for pid in paper_ids.split(",")]
             papers = [p for pid in ids if (p := await db.get_paper(pid))]
@@ -240,8 +244,11 @@ def register(mcp):
 
     @mcp.tool()
     async def deduplicate_library() -> str:
-        """Find duplicate papers in the library using DOI matching, exact title matching,
-        and fuzzy title similarity.
+        """Find duplicate papers using DOI matching, exact title matching,
+        fuzzy title similarity, and semantic embedding similarity.
+
+        Uses local embeddings (sentence-transformers) when available for
+        higher-quality dedup. Falls back to Jaccard word-set similarity.
 
         Returns suspected duplicates for review. Does not auto-delete anything.
         """
@@ -260,7 +267,7 @@ def register(mcp):
             title_map.setdefault(key, []).append(p)
 
         duplicates = []
-        seen_ids: set[str] = set()
+        seen_ids: set = set()
 
         for doi, group in doi_map.items():
             if len(group) > 1:
@@ -276,21 +283,33 @@ def register(mcp):
                     duplicates.append(("Title", title_key[:60], group))
                     seen_ids.add(ids)
 
-        # Fuzzy title matching (Jaccard on word sets, >0.85 threshold)
-        for i, p1 in enumerate(papers):
-            for p2 in papers[i+1:]:
-                if p1.id == p2.id:
-                    continue
-                pair_ids = frozenset((p1.id, p2.id))
-                if pair_ids in seen_ids:
-                    continue
-                sim = _jaccard_similarity(p1.title, p2.title)
-                if sim > 0.85:
-                    duplicates.append(("Fuzzy title", f"{sim:.0%} similar", [p1, p2]))
+        # Semantic or fuzzy title matching
+        if embeddings_available() and len(papers) >= 2:
+            from tools._embeddings import find_semantic_duplicates
+            titles = [p.title for p in papers]
+            semantic_pairs = find_semantic_duplicates(titles, threshold=0.85)
+            for i, j, sim in semantic_pairs:
+                pair_ids = frozenset((papers[i].id, papers[j].id))
+                if pair_ids not in seen_ids:
+                    duplicates.append(("Semantic", f"{sim:.0%} similar", [papers[i], papers[j]]))
                     seen_ids.add(pair_ids)
+        else:
+            # Fallback: Jaccard on word sets
+            for i, p1 in enumerate(papers):
+                for p2 in papers[i+1:]:
+                    if p1.id == p2.id:
+                        continue
+                    pair_ids = frozenset((p1.id, p2.id))
+                    if pair_ids in seen_ids:
+                        continue
+                    sim = _jaccard_similarity(p1.title, p2.title)
+                    if sim > 0.85:
+                        duplicates.append(("Fuzzy title", f"{sim:.0%} similar", [p1, p2]))
+                        seen_ids.add(pair_ids)
 
         if not duplicates:
-            return f"No duplicates found in {len(papers)}-paper library."
+            method = "semantic embeddings" if embeddings_available() else "Jaccard similarity"
+            return f"No duplicates found in {len(papers)}-paper library (checked via {method})."
 
         lines = [f"Found {len(duplicates)} duplicate group(s):\n"]
         for reason, key, group in duplicates:

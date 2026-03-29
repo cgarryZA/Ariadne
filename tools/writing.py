@@ -6,6 +6,7 @@ import json
 from typing import Optional
 
 import db
+from tools.formatting import validate_pillar
 
 
 def register(mcp):
@@ -90,6 +91,10 @@ def register(mcp):
             word_target: Target word count (default 600)
             style: 'critical' (default) | 'descriptive' | 'thematic' | 'chronological'
         """
+        pillar_err = await validate_pillar(pillar)
+        if pillar_err:
+            return pillar_err
+
         if not research_question:
             research_question = await db.get_config("research_question")
 

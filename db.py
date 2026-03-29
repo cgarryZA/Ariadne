@@ -85,6 +85,35 @@ CREATE TABLE IF NOT EXISTS config (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS extraction_cache (
+    cache_key TEXT PRIMARY KEY,
+    task TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS concepts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    description TEXT,
+    concept_type TEXT DEFAULT 'general'
+);
+
+CREATE TABLE IF NOT EXISTS concept_paper_links (
+    concept_id INTEGER REFERENCES concepts(id),
+    paper_id TEXT REFERENCES papers(id),
+    relation TEXT DEFAULT 'uses',
+    PRIMARY KEY (concept_id, paper_id)
+);
+
+CREATE TABLE IF NOT EXISTS concept_edges (
+    source_id INTEGER REFERENCES concepts(id),
+    target_id INTEGER REFERENCES concepts(id),
+    relation TEXT NOT NULL,
+    paper_id TEXT,
+    PRIMARY KEY (source_id, target_id, relation)
+);
 """
 
 # FTS5 virtual table — created separately because executescript cannot
@@ -617,5 +646,100 @@ async def get_search_history(limit: int = 20) -> list[dict]:
     db = await get_db()
     cursor = await db.execute(
         "SELECT * FROM search_history ORDER BY timestamp DESC LIMIT ?", (limit,)
+    )
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# Concept graph
+# ---------------------------------------------------------------------------
+
+async def upsert_concept(name: str, description: Optional[str] = None, concept_type: str = "general") -> int:
+    """Insert or get a concept, returning its ID."""
+    conn = await get_db()
+    cursor = await conn.execute("SELECT id FROM concepts WHERE name = ? COLLATE NOCASE", (name,))
+    row = await cursor.fetchone()
+    if row:
+        cid = row["id"]
+        if description:
+            await conn.execute("UPDATE concepts SET description = ? WHERE id = ?", (description, cid))
+            await conn.commit()
+        return cid
+    cursor = await conn.execute(
+        "INSERT INTO concepts (name, description, concept_type) VALUES (?, ?, ?)",
+        (name, description, concept_type),
+    )
+    await conn.commit()
+    return cursor.lastrowid
+
+
+async def link_concept_to_paper(concept_id: int, paper_id: str, relation: str = "uses") -> None:
+    conn = await get_db()
+    await conn.execute(
+        "INSERT OR IGNORE INTO concept_paper_links (concept_id, paper_id, relation) VALUES (?, ?, ?)",
+        (concept_id, paper_id, relation),
+    )
+    await conn.commit()
+
+
+async def add_concept_edge(source_id: int, target_id: int, relation: str, paper_id: Optional[str] = None) -> None:
+    conn = await get_db()
+    await conn.execute(
+        "INSERT OR IGNORE INTO concept_edges (source_id, target_id, relation, paper_id) VALUES (?, ?, ?, ?)",
+        (source_id, target_id, relation, paper_id),
+    )
+    await conn.commit()
+
+
+async def get_concepts_for_paper(paper_id: str) -> list[dict]:
+    conn = await get_db()
+    cursor = await conn.execute(
+        """SELECT c.id, c.name, c.description, c.concept_type, cpl.relation
+           FROM concepts c JOIN concept_paper_links cpl ON c.id = cpl.concept_id
+           WHERE cpl.paper_id = ?""",
+        (paper_id,),
+    )
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+async def get_papers_for_concept(concept_name: str) -> list[dict]:
+    conn = await get_db()
+    cursor = await conn.execute(
+        """SELECT p.id, p.title, p.year, cpl.relation
+           FROM papers p
+           JOIN concept_paper_links cpl ON p.id = cpl.paper_id
+           JOIN concepts c ON c.id = cpl.concept_id
+           WHERE c.name = ? COLLATE NOCASE
+           ORDER BY p.year""",
+        (concept_name,),
+    )
+    return [dict(r) for r in await cursor.fetchall()]
+
+
+async def get_concept_graph() -> dict:
+    """Return the full concept graph as nodes + edges."""
+    conn = await get_db()
+    nodes_cursor = await conn.execute("SELECT id, name, description, concept_type FROM concepts")
+    nodes = [dict(r) for r in await nodes_cursor.fetchall()]
+
+    edges_cursor = await conn.execute(
+        "SELECT source_id, target_id, relation, paper_id FROM concept_edges"
+    )
+    edges = [dict(r) for r in await edges_cursor.fetchall()]
+
+    return {"nodes": nodes, "edges": edges}
+
+
+async def list_concepts(limit: int = 100) -> list[dict]:
+    conn = await get_db()
+    cursor = await conn.execute(
+        """SELECT c.id, c.name, c.description, c.concept_type,
+                  COUNT(cpl.paper_id) as paper_count
+           FROM concepts c
+           LEFT JOIN concept_paper_links cpl ON c.id = cpl.concept_id
+           GROUP BY c.id
+           ORDER BY paper_count DESC
+           LIMIT ?""",
+        (limit,),
     )
     return [dict(r) for r in await cursor.fetchall()]

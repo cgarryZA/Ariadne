@@ -1,6 +1,6 @@
 [project]
 name = "ariadne"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local MCP-powered academic literature review system — search, annotate, map citations, export BibTeX"
 readme = "README.md"
 license = { text = "MIT" }
@@ -22,11 +22,25 @@ dependencies = [
     "aiosqlite>=0.20.0",
     "pydantic>=2.0.0",
     "bibtexparser>=2.0.0",
+    "tiktoken>=0.7.0",
 ]
 
 [project.optional-dependencies]
 pdf = [
     "pdfplumber>=0.10.0",
+]
+llm = [
+    "anthropic>=0.39.0",
+]
+embeddings = [
+    "sentence-transformers>=3.0.0",
+]
+vectorstore = [
+    "chromadb>=0.5.0",
+]
+math = [
+    "nougat-ocr>=0.1.0",
+    "torch>=2.0.0",
 ]
 dashboard = [
     "streamlit>=1.30.0",
@@ -38,7 +52,7 @@ dev = [
     "pytest-asyncio>=0.23.0",
 ]
 all = [
-    "ariadne[pdf,dashboard]",
+    "ariadne[pdf,llm,embeddings,vectorstore,dashboard]",
 ]
 
 [project.scripts]

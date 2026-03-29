@@ -3,13 +3,17 @@
 from tools import (
     analysis,
     classification,
+    concepts,
     discovery,
     export,
+    latex,
     library,
     monitoring,
+    network,
     reading,
     screening,
     setup,
+    synthesis,
     writing,
 )
 
@@ -21,6 +25,10 @@ _MODULES = [
     analysis,
     reading,
     classification,
+    synthesis,
+    concepts,
+    network,
+    latex,
     writing,
     monitoring,
     export,

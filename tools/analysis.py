@@ -1,11 +1,12 @@
-"""Analysis tools — statistics, gap identification, evidence synthesis, comparison."""
+"""Analysis tools — statistics, gap identification, evidence synthesis, comparison, code alignment."""
 
 from __future__ import annotations
 
 from typing import Optional
 
 import db
-from tools.formatting import format_paper
+from tools.formatting import format_paper, validate_pillar, resolve_paper_id
+from apis import github as gh
 
 
 def register(mcp):
@@ -127,6 +128,10 @@ def register(mcp):
             pillar: Limit to papers in this pillar
             chapter: Limit to papers in this chapter
         """
+        pillar_err = await validate_pillar(pillar)
+        if pillar_err:
+            return pillar_err
+
         # Fall back to configured research question
         if not research_question:
             research_question = await db.get_config("research_question")
@@ -134,7 +139,8 @@ def register(mcp):
         papers = await db.list_papers(pillar=pillar, chapter=chapter, sort_by="year", limit=200)
 
         if not papers:
-            return "No papers in library. Add papers first."
+            scope = f" in pillar '{pillar}'" if pillar else (f" in chapter '{chapter}'" if chapter else "")
+            return f"No papers found{scope}. Add papers first."
 
         lines = ["RESEARCH GAP ANALYSIS", ""]
         if research_question:
@@ -205,6 +211,8 @@ def register(mcp):
         lines += [
             "",
             "-" * 60,
+            "[MANUAL MODE — analyze the data above and respond below]",
+            "",
             "TASK: Based on the above, identify:",
             "1. Methods used in one pillar but not applied to others",
             "2. Temporal gaps -- active periods followed by silence",
@@ -235,6 +243,9 @@ def register(mcp):
             tag: Limit to papers with this tag
             limit: Max papers to include (default 50)
         """
+        pillar_err = await validate_pillar(pillar)
+        if pillar_err:
+            return pillar_err
         papers = await db.list_papers(pillar=pillar, tag=tag, sort_by="citation_count", limit=limit)
 
         if not papers:
@@ -285,6 +296,10 @@ def register(mcp):
             chapter: Select all papers in this chapter
             dimensions: Comma-separated fields to compare (default: configured extraction fields + key_findings)
         """
+        pillar_err = await validate_pillar(pillar)
+        if pillar_err:
+            return pillar_err
+
         if paper_ids:
             ids = [pid.strip() for pid in paper_ids.split(",")]
             papers = [p for pid in ids if (p := await db.get_paper(pid))]
@@ -322,6 +337,140 @@ def register(mcp):
             "  - Contradictions between papers on the same question",
             "  - Dimensions where most cells are empty (under-explored areas)",
             "  - Patterns that suggest thematic groupings",
+        ]
+
+        return "\n".join(lines)
+
+    @mcp.tool()
+    async def github_reality_check(paper_id: str) -> str:
+        """Cross-reference a paper with its linked GitHub repository.
+
+        Finds GitHub URLs in the paper's text/abstract/notes, scrapes the
+        repo, and extracts undocumented implementation tricks (batch norm,
+        gradient clipping, hyperparameters) that were omitted from the paper
+        but are required for convergence.
+
+        Args:
+            paper_id: The paper's ID
+        """
+        resolved_id, err = await resolve_paper_id(paper_id)
+        if err:
+            return err
+        paper_id = resolved_id
+        paper = await db.get_paper(paper_id)
+
+        # Find GitHub URLs in all available text
+        search_text = " ".join(filter(None, [
+            paper.abstract, paper.notes, paper.url,
+            await db.get_fulltext(paper_id),
+        ]))
+
+        repos = gh.extract_github_urls(search_text)
+
+        if not repos:
+            return (
+                f"No GitHub repository found in '{paper.title}'.\n"
+                "Check the paper's PDF or supplementary materials for a repo link,\n"
+                "then call github_reality_check_url(paper_id, 'owner/repo')."
+            )
+
+        lines = [f"GITHUB REALITY CHECK: {paper.title}", ""]
+
+        for repo in repos[:3]:  # limit to 3 repos
+            analysis = await gh.analyze_repo(repo)
+
+            if "error" in analysis:
+                lines.append(f"[{repo}] {analysis['error']}")
+                continue
+
+            info = analysis["info"]
+            lines.append(f"=== {info['full_name']} ===")
+            lines.append(f"  {info['description'] or 'No description'}")
+            lines.append(f"  Language: {info['language']} | Stars: {info['stars']} | Forks: {info['forks']}")
+            lines.append(f"  URL: {info['url']}")
+            lines.append("")
+
+            tricks = analysis.get("undocumented_tricks", [])
+            if tricks:
+                lines.append("  UNDOCUMENTED IMPLEMENTATION TRICKS:")
+                for trick in tricks:
+                    lines.append(f"    * {trick}")
+                lines.append("")
+
+            main_files = analysis.get("main_files", [])
+            if main_files:
+                lines.append(f"  Key files: {', '.join(main_files[:8])}")
+                lines.append("")
+
+        if any(analysis.get("undocumented_tricks") for repo in repos[:3]
+               if (analysis := {})):  # this was just for the conditional
+            pass
+
+        lines += [
+            "-" * 60,
+            "Compare these implementation details against the paper's methodology.",
+            "Common gaps: hyperparameter tuning, normalization, gradient management.",
+        ]
+
+        return "\n".join(lines)
+
+    @mcp.tool()
+    async def github_reality_check_url(paper_id: str, repo_url: str) -> str:
+        """Cross-reference a paper with a specific GitHub repository.
+
+        Args:
+            paper_id: The paper's ID
+            repo_url: GitHub repo in 'owner/repo' format (e.g. 'pytorch/pytorch')
+        """
+        resolved_id, err = await resolve_paper_id(paper_id)
+        if err:
+            return err
+        paper_id = resolved_id
+        paper = await db.get_paper(paper_id)
+
+        # Clean the repo URL
+        repo = repo_url.replace("https://github.com/", "").strip("/")
+
+        analysis = await gh.analyze_repo(repo)
+        if "error" in analysis:
+            return f"Error: {analysis['error']}"
+
+        info = analysis["info"]
+        lines = [
+            f"GITHUB REALITY CHECK: {paper.title}",
+            f"Repository: {info['full_name']}",
+            f"  {info['description'] or 'No description'}",
+            f"  Language: {info['language']} | Stars: {info['stars']}",
+            "",
+        ]
+
+        tricks = analysis.get("undocumented_tricks", [])
+        if tricks:
+            lines.append("UNDOCUMENTED IMPLEMENTATION TRICKS:")
+            for trick in tricks:
+                lines.append(f"  * {trick}")
+            lines.append("")
+
+        # Show code summary
+        snippets = analysis.get("code_snippets", {})
+        if snippets:
+            lines.append(f"Analyzed {len(snippets)} files: {', '.join(snippets.keys())}")
+
+        # Paper claims vs code reality
+        lines += [
+            "",
+            "-" * 60,
+            "TASK: Compare these implementation details against the paper's claims:",
+        ]
+        if paper.methodology:
+            lines.append(f"  Paper methodology: {paper.methodology}")
+        if paper.convergence_bounds:
+            lines.append(f"  Paper convergence: {paper.convergence_bounds}")
+
+        lines += [
+            "",
+            "Flag any tricks found in code but absent from the paper.",
+            "These are potential reproducibility gaps.",
         ]
 
         return "\n".join(lines)
